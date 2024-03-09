@@ -1,6 +1,6 @@
 # Development Quickstart
 
-This guide will assist you in setting up your development environment for NGINX Kubernetes Gateway, covering the steps
+This guide will assist you in setting up your development environment for NGINX Gateway Fabric, covering the steps
 to build, install, and execute tasks necessary for submitting pull requests. By following this guide, you'll have a
 fully prepared development environment that allows you to contribute to the project effectively.
 
@@ -9,8 +9,9 @@ fully prepared development environment that allows you to contribute to the proj
 Follow these steps to set up your development environment.
 
 1. Install:
-    - [Go](https://golang.org/doc/install)
+    - [Go](https://golang.org/doc/install) v1.21.0+
     - [Docker](https://docs.docker.com/get-docker/) v18.09+
+    - [Kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
     - [Kind](https://kind.sigs.k8s.io/docs/user/quick-start/)
     - [Helm](https://helm.sh/docs/intro/quickstart/#install-helm)
     - [git](https://git-scm.com/)
@@ -36,39 +37,70 @@ Follow these steps to set up your development environment.
 
      in the project root directory to install the git hooks.
 
-2. [Fork the project repository](https://github.com/nginxinc/nginx-kubernetes-gateway/fork)
+2. [Fork the project repository](https://github.com/nginxinc/nginx-gateway-fabric/fork)
 3. Clone your repository, and install the project dependencies:
 
    ```shell
-   git clone https://github.com/<YOUR-USERNAME>/nginx-kubernetes-gateway.git
-   cd nginx-kubernetes-gateway
+   git clone https://github.com/<YOUR-USERNAME>/nginx-gateway-fabric.git
+   cd nginx-gateway-fabric
    ```
 
    ```makefile
    make deps
    ```
 
-## Build the Binary and Image
+## Build the Binary and Images
+
+### Setting GOARCH
+
+The [Makefile](/Makefile) uses the GOARCH variable to build the binary and container images. The default value of GOARCH is `amd64`.
+
+If you are deploying NGINX Gateway Fabric on a kind cluster, and the architecture of your machine is not `amd64`, you will want to set the GOARCH variable to the architecture of your local machine. You can find the value of GOARCH by running `go env`. Export the GOARCH variable in your `~/.zshrc` or `~/.bashrc`.
+
+```shell
+echo "export GOARCH=< Your architecture (e.g. arm64 or amd64) >" >> ~/.bashrc
+source ~/.bashrc
+```
+
+or for zsh:
+
+```shell
+echo "export GOARCH=< Your architecture (e.g. arm64 or amd64) >" >> ~/.zshrc
+source ~/.zshrc
+```
 
 ### Build the Binary
 
 To build the binary, run the make build command from the project's root directory:
 
 ```makefile
-make build
+make GOARCH=$GOARCH build
 ```
 
 This command will build the binary and output it to the `/build/.out` directory.
 
-### Build the Image
+### Build the Images
 
-To build an NGINX Kubernetes Gateway container image from source run the following make command:
+To build the NGINX Gateway Fabric and NGINX container images from source run the following make command:
 
 ```makefile
-make TAG=$(whoami) container
+make GOARCH=$GOARCH TAG=$(whoami) build-images
 ```
 
-This will build the docker image `nginx-kubernetes-gateway:<your-user>`.
+This will build the docker images `nginx-gateway-fabric:<your-user>` and `nginx-gateway-fabric/nginx:<your-user>`.
+
+### Build the Images with NGINX Plus
+
+> Note: You will need a valid NGINX Plus license certificate and key named `nginx-repo.crt` and `nginx-repo.key` in the
+> root of this repo to build the NGINX Plus image.
+
+To build the NGINX Gateway Fabric and NGINX Plus container images from source run the following make command:
+
+```makefile
+make TAG=$(whoami) build-images-with-plus
+```
+
+This will build the docker images `nginx-gateway-fabric:<your-user>` and `nginx-gateway-fabric/nginx-plus:<your-user>`.
 
 ## Deploy on Kind
 
@@ -78,39 +110,76 @@ This will build the docker image `nginx-kubernetes-gateway:<your-user>`.
    make create-kind-cluster
    ```
 
-2. Load the previously built image onto your `kind` cluster:
+2. Load the previously built images onto your `kind` cluster:
 
    ```shell
-   kind load docker-image nginx-kubernetes-gateway:$(whoami)
+   kind load docker-image nginx-gateway-fabric:$(whoami) nginx-gateway-fabric/nginx:$(whoami)
    ```
 
-3. Install Gateway API Resources
+   or
 
    ```shell
-   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v0.7.1/standard-install.yaml
+   kind load docker-image nginx-gateway-fabric:$(whoami) nginx-gateway-fabric/nginx-plus:$(whoami)
    ```
 
-4. Install NKG using your custom image and expose NKG with a NodePort Service:
+3. Install Gateway API CRDs:
+
+   ```shell
+   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.0.0/standard-install.yaml
+   ```
+
+   If you're implementing experimental Gateway API features, install Gateway API CRDs from the experimental channel:
+
+   ```shell
+   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.0.0/experimental-install.yaml
+   ```
+
+4. Install NGF using your custom image and expose NGF with a NodePort Service:
 
    - To install with Helm (where your release name is `my-release`):
 
       ```shell
-      helm install my-release ./deploy/helm-chart --create-namespace --wait --set service.type=NodePort --set nginxGateway.image.repository=nginx-kubernetes-gateway --set nginxGateway.image.tag=$(whoami) --set nginxGateway.image.pullPolicy=Never -n nginx-gateway
+      helm install my-release ./deploy/helm-chart --create-namespace --wait --set service.type=NodePort --set nginxGateway.image.repository=nginx-gateway-fabric --set nginxGateway.image.tag=$(whoami) --set nginxGateway.image.pullPolicy=Never --set nginx.image.repository=nginx-gateway-fabric/nginx --set nginx.image.tag=$(whoami) --set nginx.image.pullPolicy=Never -n nginx-gateway
       ```
 
-      > For more information on helm configuration options see the Helm [README](/deploy/helm-chart/README.md).
+   - To install NGINX Plus with Helm (where your release name is `my-release`):
+
+      ```shell
+      helm install my-release ./deploy/helm-chart --create-namespace --wait --set service.type=NodePort --set nginxGateway.image.repository=nginx-gateway-fabric --set nginxGateway.image.tag=$(whoami) --set nginxGateway.image.pullPolicy=Never --set nginx.image.repository=nginx-gateway-fabric/nginx-plus --set nginx.image.tag=$(whoami) --set nginx.image.pullPolicy=Never --set nginx.plus=true -n nginx-gateway
+      ```
+
+   > For more information on Helm configuration options see the Helm [README](../../deploy/helm-chart/README.md).
 
    - To install with manifests:
 
       ```shell
-      make generate-manifests HELM_TEMPLATE_COMMON_ARGS="--set nginxGateway.image.repository=nginx-kubernetes-gateway --set nginxGateway.image.tag=$(whoami) --set nginxGateway.image.pullPolicy=Never"
+      make generate-manifests HELM_TEMPLATE_COMMON_ARGS="--set nginxGateway.image.repository=nginx-gateway-fabric --set nginxGateway.image.tag=$(whoami) --set nginxGateway.image.pullPolicy=Never --set nginx.image.repository=nginx-gateway-fabric/nginx --set nginx.image.tag=$(whoami) --set nginx.image.pullPolicy=Never"
+      kubectl apply -f deploy/manifests/crds
       kubectl apply -f deploy/manifests/nginx-gateway.yaml
-      kubectl apply -f deploy/manifests/nodeport.yaml
+      kubectl apply -f deploy/manifests/service/nodeport.yaml
+      ```
+
+   - To install NGINX Plus with manifests:
+
+      ```shell
+      make generate-manifests HELM_TEMPLATE_COMMON_ARGS="--set nginxGateway.image.repository=nginx-gateway-fabric --set nginxGateway.image.tag=$(whoami) --set nginxGateway.image.pullPolicy=Never --set nginx.image.repository=nginx-gateway-fabric/nginx-plus --set nginx.image.tag=$(whoami) --set nginx.image.pullPolicy=Never --set nginx.plus=true"
+      kubectl apply -f deploy/manifests/crds
+      kubectl apply -f deploy/manifests/nginx-gateway.yaml
+      kubectl apply -f deploy/manifests/service/nodeport.yaml
+      ```
+
+   - To install with experimental manifests:
+
+      ```shell
+      make generate-manifests HELM_TEMPLATE_COMMON_ARGS="--set nginxGateway.image.repository=nginx-gateway-fabric --set nginxGateway.image.tag=$(whoami) --set nginxGateway.image.pullPolicy=Never --set nginx.image.repository=nginx-gateway-fabric/nginx --set nginx.image.tag=$(whoami) --set nginx.image.pullPolicy=Never"
+      kubectl apply -f deploy/manifests/crds
+      kubectl apply -f deploy/manifests/nginx-gateway-experimental.yaml
+      kubectl apply -f deploy/manifests/service/nodeport.yaml
       ```
 
 ### Run Examples
 
-To make sure NKG is running properly, try out the [examples](/examples).
+To make sure NGF is running properly, try out the [examples](/examples).
 
 ## Run the Unit Tests
 
@@ -145,7 +214,7 @@ Run the following make command from the project's root directory to lint the Hel
 make lint-helm
 ```
 
-## Run go generate
+## Run Code Generation
 
 To ensure all the generated code is up to date, run the following make command from the project's root directory:
 
@@ -153,19 +222,11 @@ To ensure all the generated code is up to date, run the following make command f
 make generate
 ```
 
+That command also will generate the avro scheme (`.avdl`) for product telemetry data points.
+
 ## Update Generated Manifests
 
-To update the NJS ConfigMap yaml, run the following make command from the project's root directory:
-
-```shell
-make generate-njs-yaml
-```
-
-Additionally, the [NJS ConfigMap Helm template](/deploy/helm-chart/templates/njs-modules.yaml) will need to be updated.
-This is currently a manual process - ensure the content in the `data` field matches that in the
-[NJS ConfigMap manifest](/deploy/manifests/njs-modules.yaml) `data` field.
-
-Finally, to update all other generated manifests, run the following make command from the project's root directory:
+To update the generated manifests, run the following make command from the project's root directory:
 
 ```shell
 make generate-manifests

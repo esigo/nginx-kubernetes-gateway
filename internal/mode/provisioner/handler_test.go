@@ -6,22 +6,24 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	v1 "k8s.io/api/apps/v1"
+	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"sigs.k8s.io/gateway-api/apis/v1beta1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	. "github.com/onsi/gomega"
 
-	embeddedfiles "github.com/nginxinc/nginx-kubernetes-gateway"
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/framework/conditions"
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/framework/events"
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/framework/helpers"
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/framework/status"
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/framework/status/statusfakes"
+	embeddedfiles "github.com/nginxinc/nginx-gateway-fabric"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/framework/conditions"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/framework/events"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/framework/gatewayclass"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/framework/helpers"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/framework/status"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/framework/status/statusfakes"
 )
 
 var _ = Describe("handler", func() {
@@ -34,19 +36,22 @@ var _ = Describe("handler", func() {
 
 		statusUpdater status.Updater
 		k8sclient     client.Client
+		crd           *metav1.PartialObjectMetadata
+		gc            *gatewayv1.GatewayClass
 	)
 
 	BeforeEach(OncePerOrdered, func() {
 		scheme := runtime.NewScheme()
 
-		Expect(v1beta1.AddToScheme(scheme)).Should(Succeed())
+		Expect(gatewayv1.AddToScheme(scheme)).Should(Succeed())
 		Expect(v1.AddToScheme(scheme)).Should(Succeed())
+		Expect(apiext.AddToScheme(scheme)).Should(Succeed())
 
 		k8sclient = fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithStatusSubresource(
-				&v1beta1.Gateway{},
-				&v1beta1.GatewayClass{},
+				&gatewayv1.Gateway{},
+				&gatewayv1.GatewayClass{},
 			).
 			Build()
 
@@ -60,18 +65,40 @@ var _ = Describe("handler", func() {
 			Logger:                   zap.New(),
 			GatewayCtlrName:          "test.example.com",
 			GatewayClassName:         gcName,
-			PodIP:                    "1.2.3.4",
 			UpdateGatewayClassStatus: true,
 		})
+
+		// Add GatewayClass CRD to the cluster
+		crd = &metav1.PartialObjectMetadata{
+			TypeMeta: metav1.TypeMeta{
+				Kind:       "CustomResourceDefinition",
+				APIVersion: "apiextensions.k8s.io/v1",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "gatewayclasses.gateway.networking.k8s.io",
+				Annotations: map[string]string{
+					gatewayclass.BundleVersionAnnotation: gatewayclass.SupportedVersion,
+				},
+			},
+		}
+
+		err := k8sclient.Create(context.Background(), crd)
+		Expect(err).ToNot(HaveOccurred())
+
+		gc = &gatewayv1.GatewayClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: gcName,
+			},
+		}
 	})
 
-	createGateway := func(gwNsName types.NamespacedName) *v1beta1.Gateway {
-		return &v1beta1.Gateway{
+	createGateway := func(gwNsName types.NamespacedName) *gatewayv1.Gateway {
+		return &gatewayv1.Gateway{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: gwNsName.Namespace,
 				Name:      gwNsName.Name,
 			},
-			Spec: v1beta1.GatewaySpec{
+			Spec: gatewayv1.GatewaySpec{
 				GatewayClassName: gcName,
 			},
 		}
@@ -80,39 +107,44 @@ var _ = Describe("handler", func() {
 	itShouldUpsertGatewayClass := func() {
 		// Add GatewayClass to the cluster
 
-		gc := &v1beta1.GatewayClass{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: gcName,
-			},
-		}
-
 		err := k8sclient.Create(context.Background(), gc)
-		Expect(err).ShouldNot(HaveOccurred())
+		Expect(err).ToNot(HaveOccurred())
 
-		// UpsertGatewayClass
+		// UpsertGatewayClass and CRD
 
 		batch := []interface{}{
 			&events.UpsertEvent{
 				Resource: gc,
 			},
+			&events.UpsertEvent{
+				Resource: crd,
+			},
 		}
-		handler.HandleEventBatch(context.Background(), batch)
+		handler.HandleEventBatch(context.Background(), zap.New(), batch)
 
 		// Ensure GatewayClass is accepted
 
-		clusterGc := &v1beta1.GatewayClass{}
+		clusterGc := &gatewayv1.GatewayClass{}
 		err = k8sclient.Get(context.Background(), client.ObjectKeyFromObject(gc), clusterGc)
 
-		Expect(err).ShouldNot(HaveOccurred())
+		Expect(err).ToNot(HaveOccurred())
 
 		expectedConditions := []metav1.Condition{
 			{
-				Type:               string(v1beta1.GatewayClassConditionStatusAccepted),
+				Type:               string(gatewayv1.GatewayClassConditionStatusAccepted),
 				Status:             metav1.ConditionTrue,
 				ObservedGeneration: 0,
 				LastTransitionTime: fakeClockTime,
 				Reason:             "Accepted",
 				Message:            "GatewayClass is accepted",
+			},
+			{
+				Type:               string(gatewayv1.GatewayClassReasonSupportedVersion),
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 0,
+				LastTransitionTime: fakeClockTime,
+				Reason:             "SupportedVersion",
+				Message:            "Gateway API CRD versions are supported",
 			},
 		}
 
@@ -126,7 +158,7 @@ var _ = Describe("handler", func() {
 			},
 		}
 
-		handler.HandleEventBatch(context.Background(), batch)
+		handler.HandleEventBatch(context.Background(), zap.New(), batch)
 
 		depNsName := types.NamespacedName{
 			Namespace: "nginx-gateway",
@@ -136,7 +168,7 @@ var _ = Describe("handler", func() {
 		dep := &v1.Deployment{}
 		err := k8sclient.Get(context.Background(), depNsName, dep)
 
-		Expect(err).ShouldNot(HaveOccurred())
+		Expect(err).ToNot(HaveOccurred())
 
 		Expect(dep.ObjectMeta.Namespace).To(Equal("nginx-gateway"))
 		Expect(dep.ObjectMeta.Name).To(Equal(depNsName.Name))
@@ -144,6 +176,75 @@ var _ = Describe("handler", func() {
 		expectedGwFlag := fmt.Sprintf("--gateway=%s", gwNsName.String())
 		Expect(dep.Spec.Template.Spec.Containers[0].Args).To(ContainElement(expectedGwFlag))
 		Expect(dep.Spec.Template.Spec.Containers[0].Args).To(ContainElement("--update-gatewayclass-status=false"))
+		expectedLockFlag := fmt.Sprintf("--leader-election-lock-name=%s", gwNsName.Name)
+		Expect(dep.Spec.Template.Spec.Containers[0].Args).To(ContainElement(expectedLockFlag))
+	}
+
+	itShouldUpsertCRD := func(version string, accepted bool) {
+		updatedCRD := crd
+		updatedCRD.Annotations[gatewayclass.BundleVersionAnnotation] = version
+
+		err := k8sclient.Update(context.Background(), updatedCRD)
+		Expect(err).ToNot(HaveOccurred())
+
+		batch := []interface{}{
+			&events.UpsertEvent{
+				Resource: updatedCRD,
+			},
+		}
+
+		handler.HandleEventBatch(context.Background(), zap.New(), batch)
+
+		updatedGC := &gatewayv1.GatewayClass{}
+
+		err = k8sclient.Get(context.Background(), client.ObjectKeyFromObject(gc), updatedGC)
+		Expect(err).ToNot(HaveOccurred())
+
+		var expConds []metav1.Condition
+		if !accepted {
+			expConds = []metav1.Condition{
+				{
+					Type:               string(gatewayv1.GatewayClassConditionStatusAccepted),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 0,
+					LastTransitionTime: fakeClockTime,
+					Reason:             string(gatewayv1.GatewayClassReasonUnsupportedVersion),
+					Message: fmt.Sprintf("Gateway API CRD versions are not supported. "+
+						"Please install version %s", gatewayclass.SupportedVersion),
+				},
+				{
+					Type:               string(gatewayv1.GatewayClassReasonSupportedVersion),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 0,
+					LastTransitionTime: fakeClockTime,
+					Reason:             string(gatewayv1.GatewayClassReasonUnsupportedVersion),
+					Message: fmt.Sprintf("Gateway API CRD versions are not supported. "+
+						"Please install version %s", gatewayclass.SupportedVersion),
+				},
+			}
+		} else {
+			expConds = []metav1.Condition{
+				{
+					Type:               string(gatewayv1.GatewayClassConditionStatusAccepted),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 0,
+					LastTransitionTime: fakeClockTime,
+					Reason:             string(gatewayv1.GatewayClassReasonAccepted),
+					Message:            "GatewayClass is accepted",
+				},
+				{
+					Type:               string(gatewayv1.GatewayClassReasonSupportedVersion),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 0,
+					LastTransitionTime: fakeClockTime,
+					Reason:             string(gatewayv1.GatewayClassReasonUnsupportedVersion),
+					Message: fmt.Sprintf("Gateway API CRD versions are not recommended. "+
+						"Recommended version is %s", gatewayclass.SupportedVersion),
+				},
+			}
+		}
+
+		Expect(updatedGC.Status.Conditions).To(Equal(expConds))
 	}
 
 	itShouldPanicWhenUpsertingGateway := func(gwNsName types.NamespacedName) {
@@ -154,7 +255,7 @@ var _ = Describe("handler", func() {
 		}
 
 		handle := func() {
-			handler.HandleEventBatch(context.Background(), batch)
+			handler.HandleEventBatch(context.Background(), zap.New(), batch)
 		}
 
 		Expect(handle).Should(Panic())
@@ -177,7 +278,6 @@ var _ = Describe("handler", func() {
 				gcName,
 				statusUpdater,
 				k8sclient,
-				zap.New(),
 				embeddedfiles.StaticModeDeploymentYAML,
 			)
 		})
@@ -210,17 +310,17 @@ var _ = Describe("handler", func() {
 			It("should remove first Deployment", func() {
 				batch := []interface{}{
 					&events.DeleteEvent{
-						Type:           &v1beta1.Gateway{},
+						Type:           &gatewayv1.Gateway{},
 						NamespacedName: gwNsName1,
 					},
 				}
 
-				handler.HandleEventBatch(context.Background(), batch)
+				handler.HandleEventBatch(context.Background(), zap.New(), batch)
 				deps := &v1.DeploymentList{}
 
 				err := k8sclient.List(context.Background(), deps)
 
-				Expect(err).ShouldNot(HaveOccurred())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(deps.Items).To(HaveLen(1))
 				Expect(deps.Items[0].ObjectMeta.Name).To(Equal("nginx-gateway-2"))
 			})
@@ -230,30 +330,30 @@ var _ = Describe("handler", func() {
 			It("should remove second Deployment", func() {
 				batch := []interface{}{
 					&events.DeleteEvent{
-						Type:           &v1beta1.Gateway{},
+						Type:           &gatewayv1.Gateway{},
 						NamespacedName: gwNsName2,
 					},
 				}
 
-				handler.HandleEventBatch(context.Background(), batch)
+				handler.HandleEventBatch(context.Background(), zap.New(), batch)
 
 				deps := &v1.DeploymentList{}
 
 				err := k8sclient.List(context.Background(), deps)
 
-				Expect(err).ShouldNot(HaveOccurred())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(deps.Items).To(HaveLen(0))
 			})
 		})
 
 		When("upserting Gateway for a different GatewayClass", func() {
 			It("should not create Deployment", func() {
-				gw := &v1beta1.Gateway{
+				gw := &gatewayv1.Gateway{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-gw-3",
 						Namespace: "test-ns-3",
 					},
-					Spec: v1beta1.GatewaySpec{
+					Spec: gatewayv1.GatewaySpec{
 						GatewayClassName: "some-class",
 					},
 				}
@@ -264,53 +364,76 @@ var _ = Describe("handler", func() {
 					},
 				}
 
-				handler.HandleEventBatch(context.Background(), batch)
+				handler.HandleEventBatch(context.Background(), zap.New(), batch)
 
 				deps := &v1.DeploymentList{}
 				err := k8sclient.List(context.Background(), deps)
 
-				Expect(err).ShouldNot(HaveOccurred())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(deps.Items).To(HaveLen(0))
 			})
 		})
 
 		When("upserting GatewayClass that is not set in command-line argument", func() {
 			It("should set the proper status if this controller is referenced", func() {
-				gc := &v1beta1.GatewayClass{
+				newGC := &gatewayv1.GatewayClass{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "unknown-gc",
 					},
-					Spec: v1beta1.GatewayClassSpec{
+					Spec: gatewayv1.GatewayClassSpec{
 						ControllerName: "test.example.com",
 					},
 				}
-				err := k8sclient.Create(context.Background(), gc)
-				Expect(err).ShouldNot(HaveOccurred())
+
+				err := k8sclient.Create(context.Background(), newGC)
+				Expect(err).ToNot(HaveOccurred())
 
 				batch := []interface{}{
 					&events.UpsertEvent{
-						Resource: gc,
+						Resource: newGC,
+					},
+					&events.UpsertEvent{
+						Resource: crd,
 					},
 				}
 
-				handler.HandleEventBatch(context.Background(), batch)
+				handler.HandleEventBatch(context.Background(), zap.New(), batch)
 
-				unknownGC := &v1beta1.GatewayClass{}
-				err = k8sclient.Get(context.Background(), client.ObjectKeyFromObject(gc), unknownGC)
-				Expect(err).ShouldNot(HaveOccurred())
+				unknownGC := &gatewayv1.GatewayClass{}
+				err = k8sclient.Get(context.Background(), client.ObjectKeyFromObject(newGC), unknownGC)
+				Expect(err).ToNot(HaveOccurred())
 
 				expectedConditions := []metav1.Condition{
 					{
-						Type:               string(v1beta1.GatewayClassConditionStatusAccepted),
+						Type:               string(gatewayv1.GatewayClassReasonSupportedVersion),
+						Status:             metav1.ConditionTrue,
+						ObservedGeneration: 0,
+						LastTransitionTime: fakeClockTime,
+						Reason:             "SupportedVersion",
+						Message:            "Gateway API CRD versions are supported",
+					},
+					{
+						Type:               string(gatewayv1.GatewayClassConditionStatusAccepted),
 						Status:             metav1.ConditionFalse,
 						ObservedGeneration: 0,
 						LastTransitionTime: fakeClockTime,
 						Reason:             string(conditions.GatewayClassReasonGatewayClassConflict),
-						Message:            string(conditions.GatewayClassMessageGatewayClassConflict),
+						Message:            conditions.GatewayClassMessageGatewayClassConflict,
 					},
 				}
-
 				Expect(unknownGC.Status.Conditions).To(Equal(expectedConditions))
+			})
+		})
+
+		When("upserting Gateway API CRD that is not a supported major version", func() {
+			It("should set the SupportedVersion and Accepted statuses to false on GatewayClass", func() {
+				itShouldUpsertCRD("v99.0.0", false /* accepted */)
+			})
+		})
+
+		When("upserting Gateway API CRD that is not a supported minor version", func() {
+			It("should set the SupportedVersion status to false and Accepted status to true on GatewayClass", func() {
+				itShouldUpsertCRD("1.99.0", true /* accepted */)
 			})
 		})
 	})
@@ -328,7 +451,6 @@ var _ = Describe("handler", func() {
 				gcName,
 				statusUpdater,
 				k8sclient,
-				zap.New(),
 				embeddedfiles.StaticModeDeploymentYAML,
 			)
 		})
@@ -338,7 +460,7 @@ var _ = Describe("handler", func() {
 				batch := []interface{}{e}
 
 				handle := func() {
-					handler.HandleEventBatch(context.TODO(), batch)
+					handler.HandleEventBatch(context.Background(), zap.New(), batch)
 				}
 
 				Expect(handle).Should(Panic())
@@ -347,11 +469,11 @@ var _ = Describe("handler", func() {
 				&struct{}{}),
 			Entry("should panic for an unknown type of resource in upsert event",
 				&events.UpsertEvent{
-					Resource: &v1beta1.HTTPRoute{},
+					Resource: &gatewayv1.HTTPRoute{},
 				}),
 			Entry("should panic for an unknown type of resource in delete event",
 				&events.DeleteEvent{
-					Type: &v1beta1.HTTPRoute{},
+					Type: &gatewayv1.HTTPRoute{},
 				}),
 		)
 
@@ -375,7 +497,7 @@ var _ = Describe("handler", func() {
 				}
 
 				err := k8sclient.Create(context.Background(), dep)
-				Expect(err).ShouldNot(HaveOccurred())
+				Expect(err).ToNot(HaveOccurred())
 
 				itShouldPanicWhenUpsertingGateway(gwNsName)
 			})
@@ -396,17 +518,17 @@ var _ = Describe("handler", func() {
 				}
 
 				err := k8sclient.Delete(context.Background(), dep)
-				Expect(err).ShouldNot(HaveOccurred())
+				Expect(err).ToNot(HaveOccurred())
 
 				batch := []interface{}{
 					&events.DeleteEvent{
-						Type:           &v1beta1.Gateway{},
+						Type:           &gatewayv1.Gateway{},
 						NamespacedName: gwNsName,
 					},
 				}
 
 				handle := func() {
-					handler.HandleEventBatch(context.Background(), batch)
+					handler.HandleEventBatch(context.Background(), zap.New(), batch)
 				}
 
 				Expect(handle).Should(Panic())
@@ -419,7 +541,7 @@ var _ = Describe("handler", func() {
 
 				batch := []interface{}{
 					&events.DeleteEvent{
-						Type: &v1beta1.GatewayClass{},
+						Type: &gatewayv1.GatewayClass{},
 						NamespacedName: types.NamespacedName{
 							Name: gcName,
 						},
@@ -427,7 +549,7 @@ var _ = Describe("handler", func() {
 				}
 
 				handle := func() {
-					handler.HandleEventBatch(context.Background(), batch)
+					handler.HandleEventBatch(context.Background(), zap.New(), batch)
 				}
 
 				Expect(handle).Should(Panic())
@@ -440,7 +562,6 @@ var _ = Describe("handler", func() {
 					gcName,
 					statusUpdater,
 					k8sclient,
-					zap.New(),
 					[]byte("broken YAML"),
 				)
 

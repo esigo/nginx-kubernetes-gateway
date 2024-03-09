@@ -2,175 +2,44 @@ package dataplane
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"sort"
 
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/gateway-api/apis/v1beta1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	v1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/state/graph"
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/state/resolver"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/state/graph"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/state/resolver"
 )
-
-type PathType string
 
 const (
-	wildcardHostname          = "~^"
-	PathTypePrefix   PathType = "prefix"
-	PathTypeExact    PathType = "exact"
+	wildcardHostname    = "~^"
+	alpineSSLRootCAPath = "/etc/ssl/cert.pem"
 )
 
-// Configuration is an intermediate representation of dataplane configuration.
-type Configuration struct {
-	// SSLKeyPairs holds all unique SSLKeyPairs.
-	SSLKeyPairs map[SSLKeyPairID]SSLKeyPair
-	// HTTPServers holds all HTTPServers.
-	HTTPServers []VirtualServer
-	// SSLServers holds all SSLServers.
-	SSLServers []VirtualServer
-	// Upstreams holds all unique Upstreams.
-	Upstreams []Upstream
-	// BackendGroups holds all unique BackendGroups.
-	BackendGroups []BackendGroup
-}
-
-// SSLKeyPairID is a unique identifier for a SSLKeyPair.
-// The ID is safe to use as a file name.
-type SSLKeyPairID string
-
-// SSLKeyPair is an SSL private/public key pair.
-type SSLKeyPair struct {
-	Cert, Key []byte
-}
-
-// VirtualServer is a virtual server.
-type VirtualServer struct {
-	// SSL holds the SSL configuration for the server.
-	SSL *SSL
-	// Hostname is the hostname of the server.
-	Hostname string
-	// PathRules is a collection of routing rules.
-	PathRules []PathRule
-	// IsDefault indicates whether the server is the default server.
-	IsDefault bool
-	// Port is the port of the server.
-	Port int32
-}
-
-// Upstream is a pool of endpoints to be load balanced.
-type Upstream struct {
-	// Name is the name of the Upstream. Will be unique for each service/port combination.
-	Name string
-	// ErrorMsg contains the error message if the Upstream is invalid.
-	ErrorMsg string
-	// Endpoints are the endpoints of the Upstream.
-	Endpoints []resolver.Endpoint
-}
-
-// SSL is the SSL configuration for a server.
-type SSL struct {
-	KeyPairID SSLKeyPairID
-}
-
-// PathRule represents routing rules that share a common path.
-type PathRule struct {
-	// Path is a path. For example, '/hello'.
-	Path string
-	// PathType is simplified path type. For example, prefix or exact.
-	PathType PathType
-	// MatchRules holds routing rules.
-	MatchRules []MatchRule
-}
-
-type HTTPHeaderFilter struct {
-	Set    []HTTPHeader
-	Add    []HTTPHeader
-	Remove []string
-}
-
-type HTTPHeader struct {
-	Name  string
-	Value string
-}
-
-// InvalidFilter is a special filter for handling the case when configured filters are invalid.
-type InvalidFilter struct{}
-
-// Filters hold the filters for a MatchRule.
-type Filters struct {
-	InvalidFilter          *InvalidFilter
-	RequestRedirect        *v1beta1.HTTPRequestRedirectFilter
-	RequestHeaderModifiers *HTTPHeaderFilter
-}
-
-// MatchRule represents a routing rule. It corresponds directly to a Match in the HTTPRoute resource.
-// An HTTPRoute is guaranteed to have at least one rule with one match.
-// If no rule or match is specified by the user, the default rule {{path:{ type: "PathPrefix", value: "/"}}}
-// is set by the schema.
-type MatchRule struct {
-	// Filters holds the filters for the MatchRule.
-	Filters Filters
-	// Source is the corresponding HTTPRoute resource.
-	Source *v1beta1.HTTPRoute
-	// BackendGroup is the group of Backends that the rule routes to.
-	BackendGroup BackendGroup
-	// MatchIdx is the index of the rule in the Rule.Matches.
-	MatchIdx int
-	// RuleIdx is the index of the corresponding rule in the HTTPRoute.
-	RuleIdx int
-}
-
-// BackendGroup represents a group of Backends for a routing rule in an HTTPRoute.
-type BackendGroup struct {
-	// Source is the NamespacedName of the HTTPRoute the group belongs to.
-	Source types.NamespacedName
-	// Backends is a list of Backends in the Group.
-	Backends []Backend
-	// RuleIdx is the index of the corresponding rule in the HTTPRoute.
-	RuleIdx int
-}
-
-// Name returns the name of the backend group.
-// This name must be unique across all HTTPRoutes and all rules within the same HTTPRoute.
-// The RuleIdx is used to make the name unique across all rules within the same HTTPRoute.
-// The RuleIdx may change for a given rule if an update is made to the HTTPRoute, but it will always match the index
-// of the rule in the stored HTTPRoute.
-func (bg *BackendGroup) Name() string {
-	return fmt.Sprintf("%s__%s_rule%d", bg.Source.Namespace, bg.Source.Name, bg.RuleIdx)
-}
-
-// Backend represents a Backend for a routing rule.
-type Backend struct {
-	// UpstreamName is the name of the upstream for this backend.
-	UpstreamName string
-	// Weight is the weight of the BackendRef.
-	// The possible values of weight are 0-1,000,000.
-	// If weight is 0, no traffic should be forwarded for this entry.
-	Weight int32
-	// Valid indicates whether the Backend is valid.
-	Valid bool
-}
-
-// GetMatch returns the HTTPRouteMatch of the Route .
-func (r *MatchRule) GetMatch() v1beta1.HTTPRouteMatch {
-	return r.Source.Spec.Rules[r.RuleIdx].Matches[r.MatchIdx]
-}
-
 // BuildConfiguration builds the Configuration from the Graph.
-func BuildConfiguration(ctx context.Context, g *graph.Graph, resolver resolver.ServiceResolver) Configuration {
+func BuildConfiguration(
+	ctx context.Context,
+	g *graph.Graph,
+	resolver resolver.ServiceResolver,
+	configVersion int,
+) Configuration {
 	if g.GatewayClass == nil || !g.GatewayClass.Valid {
-		return Configuration{}
+		return Configuration{Version: configVersion}
 	}
 
 	if g.Gateway == nil {
-		return Configuration{}
+		return Configuration{Version: configVersion}
 	}
 
 	upstreams := buildUpstreams(ctx, g.Gateway.Listeners, resolver)
 	httpServers, sslServers := buildServers(g.Gateway.Listeners)
 	backendGroups := buildBackendGroups(append(httpServers, sslServers...))
 	keyPairs := buildSSLKeyPairs(g.ReferencedSecrets, g.Gateway.Listeners)
+	certBundles := buildCertBundles(g.ReferencedCaCertConfigMaps, backendGroups)
 
 	config := Configuration{
 		HTTPServers:   httpServers,
@@ -178,6 +47,8 @@ func BuildConfiguration(ctx context.Context, g *graph.Graph, resolver resolver.S
 		Upstreams:     upstreams,
 		BackendGroups: backendGroups,
 		SSLKeyPairs:   keyPairs,
+		Version:       configVersion,
+		CertBundles:   certBundles,
 	}
 
 	return config
@@ -187,7 +58,7 @@ func BuildConfiguration(ctx context.Context, g *graph.Graph, resolver resolver.S
 // valid listeners, so that we don't include unused Secrets in the configuration of the data plane.
 func buildSSLKeyPairs(
 	secrets map[types.NamespacedName]*graph.Secret,
-	listeners map[string]*graph.Listener,
+	listeners []*graph.Listener,
 ) map[SSLKeyPairID]SSLKeyPair {
 	keyPairs := make(map[SSLKeyPairID]SSLKeyPair)
 
@@ -205,6 +76,47 @@ func buildSSLKeyPairs(
 	}
 
 	return keyPairs
+}
+
+func buildCertBundles(
+	caCertConfigMaps map[types.NamespacedName]*graph.CaCertConfigMap,
+	backendGroups []BackendGroup,
+) map[CertBundleID]CertBundle {
+	bundles := make(map[CertBundleID]CertBundle)
+	refByBG := make(map[CertBundleID]struct{})
+
+	// We only need to build the cert bundles if there are valid backend groups that reference them.
+	if len(backendGroups) == 0 {
+		return bundles
+	}
+	for _, bg := range backendGroups {
+		if bg.Backends == nil {
+			continue
+		}
+		for _, b := range bg.Backends {
+			if !b.Valid || b.VerifyTLS == nil {
+				continue
+			}
+			refByBG[b.VerifyTLS.CertBundleID] = struct{}{}
+		}
+	}
+
+	for cmName, cm := range caCertConfigMaps {
+		id := generateCertBundleID(cmName)
+		if _, exists := refByBG[id]; exists {
+			if cm.CACert != nil || len(cm.CACert) > 0 {
+				// the cert could be base64 encoded or plaintext
+				data := make([]byte, base64.StdEncoding.DecodedLen(len(cm.CACert)))
+				_, err := base64.StdEncoding.Decode(data, cm.CACert)
+				if err != nil {
+					data = cm.CACert
+				}
+				bundles[id] = CertBundle(data)
+			}
+		}
+	}
+
+	return bundles
 }
 
 func buildBackendGroups(servers []VirtualServer) []BackendGroup {
@@ -257,6 +169,7 @@ func newBackendGroup(refs []graph.BackendRef, sourceNsName types.NamespacedName,
 			UpstreamName: ref.ServicePortReference(),
 			Weight:       ref.Weight,
 			Valid:        ref.Valid,
+			VerifyTLS:    convertBackendTLS(ref.BackendTLSPolicy),
 		})
 	}
 
@@ -267,10 +180,24 @@ func newBackendGroup(refs []graph.BackendRef, sourceNsName types.NamespacedName,
 	}
 }
 
-func buildServers(listeners map[string]*graph.Listener) (http, ssl []VirtualServer) {
-	rulesForProtocol := map[v1beta1.ProtocolType]portPathRules{
-		v1beta1.HTTPProtocolType:  make(portPathRules),
-		v1beta1.HTTPSProtocolType: make(portPathRules),
+func convertBackendTLS(btp *graph.BackendTLSPolicy) *VerifyTLS {
+	if btp == nil || !btp.Valid {
+		return nil
+	}
+	verify := &VerifyTLS{}
+	if btp.CaCertRef.Name != "" {
+		verify.CertBundleID = generateCertBundleID(btp.CaCertRef)
+	} else {
+		verify.RootCAPath = alpineSSLRootCAPath
+	}
+	verify.Hostname = string(btp.Source.Spec.TLS.Hostname)
+	return verify
+}
+
+func buildServers(listeners []*graph.Listener) (http, ssl []VirtualServer) {
+	rulesForProtocol := map[v1.ProtocolType]portPathRules{
+		v1.HTTPProtocolType:  make(portPathRules),
+		v1.HTTPSProtocolType: make(portPathRules),
 	}
 
 	for _, l := range listeners {
@@ -285,14 +212,14 @@ func buildServers(listeners map[string]*graph.Listener) (http, ssl []VirtualServ
 		}
 	}
 
-	httpRules := rulesForProtocol[v1beta1.HTTPProtocolType]
-	sslRules := rulesForProtocol[v1beta1.HTTPSProtocolType]
+	httpRules := rulesForProtocol[v1.HTTPProtocolType]
+	sslRules := rulesForProtocol[v1.HTTPSProtocolType]
 
 	return httpRules.buildServers(), sslRules.buildServers()
 }
 
 // portPathRules keeps track of hostPathRules per port
-type portPathRules map[v1beta1.PortNumber]*hostPathRules
+type portPathRules map[v1.PortNumber]*hostPathRules
 
 func (p portPathRules) buildServers() []VirtualServer {
 	serverCount := 0
@@ -311,7 +238,7 @@ func (p portPathRules) buildServers() []VirtualServer {
 
 type pathAndType struct {
 	path     string
-	pathType v1beta1.PathMatchType
+	pathType v1.PathMatchType
 }
 
 type hostPathRules struct {
@@ -334,72 +261,84 @@ func (hpr *hostPathRules) upsertListener(l *graph.Listener) {
 	hpr.listenersExist = true
 	hpr.port = int32(l.Source.Port)
 
-	if l.Source.Protocol == v1beta1.HTTPSProtocolType {
+	if l.Source.Protocol == v1.HTTPSProtocolType {
 		hpr.httpsListeners = append(hpr.httpsListeners, l)
 	}
 
-	for routeNsName, r := range l.Routes {
-		var hostnames []string
-		for _, p := range r.ParentRefs {
-			if val, exist := p.Attachment.AcceptedHostnames[string(l.Source.Name)]; exist {
-				hostnames = val
+	for _, r := range l.Routes {
+		if !r.Valid {
+			continue
+		}
+
+		hpr.upsertRoute(r, l)
+	}
+}
+
+func (hpr *hostPathRules) upsertRoute(route *graph.Route, listener *graph.Listener) {
+	var hostnames []string
+	for _, p := range route.ParentRefs {
+		if val, exist := p.Attachment.AcceptedHostnames[string(listener.Source.Name)]; exist {
+			hostnames = val
+		}
+	}
+
+	for _, h := range hostnames {
+		if prevListener, exists := hpr.listenersForHost[h]; exists {
+			// override the previous listener if the new one has a more specific hostname
+			if listenerHostnameMoreSpecific(listener.Source.Hostname, prevListener.Source.Hostname) {
+				hpr.listenersForHost[h] = listener
+			}
+		} else {
+			hpr.listenersForHost[h] = listener
+		}
+
+		if _, exist := hpr.rulesPerHost[h]; !exist {
+			hpr.rulesPerHost[h] = make(map[pathAndType]PathRule)
+		}
+	}
+
+	for i, rule := range route.Source.Spec.Rules {
+		if !route.Rules[i].ValidMatches {
+			continue
+		}
+
+		var filters HTTPFilters
+		if route.Rules[i].ValidFilters {
+			filters = createHTTPFilters(rule.Filters)
+		} else {
+			filters = HTTPFilters{
+				InvalidFilter: &InvalidHTTPFilter{},
 			}
 		}
 
 		for _, h := range hostnames {
-			if prevListener, exists := hpr.listenersForHost[h]; exists {
-				// override the previous listener if the new one has a more specific hostname
-				if listenerHostnameMoreSpecific(l.Source.Hostname, prevListener.Source.Hostname) {
-					hpr.listenersForHost[h] = l
+			for _, m := range rule.Matches {
+				path := getPath(m.Path)
+
+				key := pathAndType{
+					path:     path,
+					pathType: *m.Path.Type,
 				}
-			} else {
-				hpr.listenersForHost[h] = l
-			}
 
-			if _, exist := hpr.rulesPerHost[h]; !exist {
-				hpr.rulesPerHost[h] = make(map[pathAndType]PathRule)
-			}
-		}
-
-		for i, rule := range r.Source.Spec.Rules {
-			if !r.Rules[i].ValidMatches {
-				continue
-			}
-
-			var filters Filters
-			if r.Rules[i].ValidFilters {
-				filters = createFilters(rule.Filters)
-			} else {
-				filters = Filters{
-					InvalidFilter: &InvalidFilter{},
+				rule, exist := hpr.rulesPerHost[h][key]
+				if !exist {
+					rule.Path = path
+					rule.PathType = convertPathType(*m.Path.Type)
 				}
-			}
 
-			for _, h := range hostnames {
-				for j, m := range rule.Matches {
-					path := getPath(m.Path)
+				// create iteration variable inside the loop to fix implicit memory aliasing
+				om := route.Source.ObjectMeta
 
-					key := pathAndType{
-						path:     path,
-						pathType: *m.Path.Type,
-					}
+				routeNsName := client.ObjectKeyFromObject(route.Source)
 
-					rule, exist := hpr.rulesPerHost[h][key]
-					if !exist {
-						rule.Path = path
-						rule.PathType = convertPathType(*m.Path.Type)
-					}
+				rule.MatchRules = append(rule.MatchRules, MatchRule{
+					Source:       &om,
+					BackendGroup: newBackendGroup(route.Rules[i].BackendRefs, routeNsName, i),
+					Filters:      filters,
+					Match:        convertMatch(m),
+				})
 
-					rule.MatchRules = append(rule.MatchRules, MatchRule{
-						MatchIdx:     j,
-						RuleIdx:      i,
-						Source:       r.Source,
-						BackendGroup: newBackendGroup(r.Rules[i].BackendRefs, routeNsName, i),
-						Filters:      filters,
-					})
-
-					hpr.rulesPerHost[h][key] = rule
-				}
+				hpr.rulesPerHost[h][key] = rule
 			}
 		}
 	}
@@ -491,7 +430,7 @@ func (hpr *hostPathRules) maxServerCount() int {
 
 func buildUpstreams(
 	ctx context.Context,
-	listeners map[string]*graph.Listener,
+	listeners []*graph.Listener,
 	resolver resolver.ServiceResolver,
 ) []Upstream {
 	// There can be duplicate upstreams if multiple routes reference the same upstream.
@@ -505,6 +444,10 @@ func buildUpstreams(
 		}
 
 		for _, route := range l.Routes {
+			if !route.Valid {
+				continue
+			}
+
 			for _, rule := range route.Rules {
 				if !rule.ValidMatches || !rule.ValidFilters {
 					// don't generate upstreams for rules that have invalid matches or filters
@@ -521,7 +464,7 @@ func buildUpstreams(
 
 						var errMsg string
 
-						eps, err := resolver.Resolve(ctx, br.Svc, br.Port)
+						eps, err := resolver.Resolve(ctx, br.SvcNsName, br.ServicePort)
 						if err != nil {
 							errMsg = err.Error()
 						}
@@ -549,7 +492,7 @@ func buildUpstreams(
 	return upstreams
 }
 
-func getListenerHostname(h *v1beta1.Hostname) string {
+func getListenerHostname(h *v1.Hostname) string {
 	if h == nil || *h == "" {
 		return wildcardHostname
 	}
@@ -557,61 +500,40 @@ func getListenerHostname(h *v1beta1.Hostname) string {
 	return string(*h)
 }
 
-func getPath(path *v1beta1.HTTPPathMatch) string {
+func getPath(path *v1.HTTPPathMatch) string {
 	if path == nil || path.Value == nil || *path.Value == "" {
 		return "/"
 	}
 	return *path.Value
 }
 
-func createFilters(filters []v1beta1.HTTPRouteFilter) Filters {
-	var result Filters
+func createHTTPFilters(filters []v1.HTTPRouteFilter) HTTPFilters {
+	var result HTTPFilters
 
 	for _, f := range filters {
 		switch f.Type {
-		case v1beta1.HTTPRouteFilterRequestRedirect:
+		case v1.HTTPRouteFilterRequestRedirect:
 			if result.RequestRedirect == nil {
 				// using the first filter
-				result.RequestRedirect = f.RequestRedirect
+				result.RequestRedirect = convertHTTPRequestRedirectFilter(f.RequestRedirect)
 			}
-		case v1beta1.HTTPRouteFilterRequestHeaderModifier:
+		case v1.HTTPRouteFilterURLRewrite:
+			if result.RequestURLRewrite == nil {
+				// using the first filter
+				result.RequestURLRewrite = convertHTTPURLRewriteFilter(f.URLRewrite)
+			}
+		case v1.HTTPRouteFilterRequestHeaderModifier:
 			if result.RequestHeaderModifiers == nil {
 				// using the first filter
-				result.RequestHeaderModifiers = convertHTTPFilter(f.RequestHeaderModifier)
+				result.RequestHeaderModifiers = convertHTTPHeaderFilter(f.RequestHeaderModifier)
 			}
 		}
 	}
 	return result
 }
 
-func convertHTTPFilter(httpFilter *v1beta1.HTTPHeaderFilter) *HTTPHeaderFilter {
-	result := &HTTPHeaderFilter{
-		Remove: httpFilter.Remove,
-		Set:    make([]HTTPHeader, 0, len(httpFilter.Set)),
-		Add:    make([]HTTPHeader, 0, len(httpFilter.Add)),
-	}
-	for _, s := range httpFilter.Set {
-		result.Set = append(result.Set, HTTPHeader{Name: string(s.Name), Value: s.Value})
-	}
-	for _, a := range httpFilter.Add {
-		result.Add = append(result.Add, HTTPHeader{Name: string(a.Name), Value: a.Value})
-	}
-	return result
-}
-
-func convertPathType(pathType v1beta1.PathMatchType) PathType {
-	switch pathType {
-	case v1beta1.PathMatchPathPrefix:
-		return PathTypePrefix
-	case v1beta1.PathMatchExact:
-		return PathTypeExact
-	default:
-		panic(fmt.Sprintf("unsupported path type: %s", pathType))
-	}
-}
-
 // listenerHostnameMoreSpecific returns true if host1 is more specific than host2.
-func listenerHostnameMoreSpecific(host1, host2 *v1beta1.Hostname) bool {
+func listenerHostnameMoreSpecific(host1, host2 *v1.Hostname) bool {
 	var host1Str, host2Str string
 	if host1 != nil {
 		host1Str = string(*host1)
@@ -629,4 +551,11 @@ func listenerHostnameMoreSpecific(host1, host2 *v1beta1.Hostname) bool {
 // The ID is safe to use as a file name.
 func generateSSLKeyPairID(secret types.NamespacedName) SSLKeyPairID {
 	return SSLKeyPairID(fmt.Sprintf("ssl_keypair_%s_%s", secret.Namespace, secret.Name))
+}
+
+// generateCertBundleID generates an ID for the certificate bundle based on the ConfigMap namespaced name.
+// It is guaranteed to be unique per unique namespaced name.
+// The ID is safe to use as a file name.
+func generateCertBundleID(configMap types.NamespacedName) CertBundleID {
+	return CertBundleID(fmt.Sprintf("cert_bundle_%s_%s", configMap.Namespace, configMap.Name))
 }

@@ -3,28 +3,17 @@ package validation
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/nginx/config"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/nginx/config"
 )
 
 // HTTPNJSMatchValidator validates values used for matching a request.
 // The matching is implemented in NJS (except for path matching),
 // so changes to the implementation change the validation rules here.
 type HTTPNJSMatchValidator struct{}
-
-const (
-	pathFmt    = `/[^\s{};]*`
-	pathErrMsg = "must start with / and must not include any whitespace character, `{`, `}` or `;`"
-)
-
-var (
-	pathRegexp   = regexp.MustCompile("^" + pathFmt + "$")
-	pathExamples = []string{"/", "/path", "/path/subpath-123"}
-)
 
 // ValidatePathInMatch a path used in the location directive.
 func (HTTPNJSMatchValidator) ValidatePathInMatch(path string) error {
@@ -37,15 +26,14 @@ func (HTTPNJSMatchValidator) ValidatePathInMatch(path string) error {
 		return errors.New(msg)
 	}
 
-	// FIXME(pleshakov): This function will no longer be
-	// needed once https://github.com/nginxinc/nginx-kubernetes-gateway/issues/428 is fixed.
-	// That's because the location path gets into the set directive in the location block.
-	// Example: set $http_matches "[{\"redirectPath\":\"/coffee_route0\" ...
-	// Where /coffee is tha path.
-	return validateCommonNJSMatchPart(path)
+	return nil
 }
 
 func (HTTPNJSMatchValidator) ValidateHeaderNameInMatch(name string) error {
+	if err := k8svalidation.IsHTTPHeaderName(name); err != nil {
+		return errors.New(err[0])
+	}
+
 	return validateNJSHeaderPart(name)
 }
 

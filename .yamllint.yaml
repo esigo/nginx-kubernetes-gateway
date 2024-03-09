@@ -1,12 +1,12 @@
 ---
-
 yaml-files:
-  - '*.yaml'
-  - '*.yml'
+  - "*.yaml"
+  - "*.yml"
 
 ignore:
   - deploy/helm-chart/templates/
   - deploy/helm-chart/crds/
+  - .github/workflows/
 
 rules:
   braces: enable
@@ -30,7 +30,7 @@ rules:
     check-multi-line-strings: true
     ignore: |
       deploy/manifests/nginx-gateway.yaml
-      deploy/manifests/njs-modules.yaml
+      deploy/manifests/crds
   key-duplicates: enable
   key-ordering: disable
   line-length:
@@ -38,8 +38,11 @@ rules:
     allow-non-breakable-words: true
     allow-non-breakable-inline-mappings: true
     ignore: |
-      .github/workflows/
+      .github/
       deploy/manifests/nginx-gateway.yaml
+      deploy/manifests/crds
+      tests/longevity/manifests/cronjob.yaml
+      .goreleaser.yml
   new-line-at-end-of-file: enable
   new-lines: enable
   octal-values: disable

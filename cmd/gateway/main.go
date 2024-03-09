@@ -5,11 +5,18 @@ import (
 	"os"
 )
 
+// Set during go build
 var (
-	// Set during go build
 	version string
 	commit  string
 	date    string
+
+	// telemetryReportPeriod is the period at which telemetry reports are sent.
+	telemetryReportPeriod string
+	// telemetryEndpoint is the endpoint to which telemetry reports are sent.
+	telemetryEndpoint string
+	// telemetryEndpointInsecure controls whether TLS should be used when sending telemetry reports.
+	telemetryEndpointInsecure string
 )
 
 func main() {
@@ -18,6 +25,7 @@ func main() {
 	rootCmd.AddCommand(
 		createStaticModeCommand(),
 		createProvisionerModeCommand(),
+		createSleepCommand(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

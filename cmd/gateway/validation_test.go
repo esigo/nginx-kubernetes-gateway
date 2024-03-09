@@ -15,17 +15,17 @@ func TestValidateGatewayControllerName(t *testing.T) {
 	}{
 		{
 			name:   "valid",
-			value:  "k8s-gateway.nginx.org/nginx-gateway",
+			value:  "gateway.nginx.org/nginx-gateway",
 			expErr: false,
 		},
 		{
 			name:   "valid - with subpath",
-			value:  "k8s-gateway.nginx.org/nginx-gateway/my-gateway",
+			value:  "gateway.nginx.org/nginx-gateway/my-gateway",
 			expErr: false,
 		},
 		{
 			name:   "valid - with complex subpath",
-			value:  "k8s-gateway.nginx.org/nginx-gateway/my-gateway/v1",
+			value:  "gateway.nginx.org/nginx-gateway/my-gateway/v1",
 			expErr: false,
 		},
 		{
@@ -35,12 +35,12 @@ func TestValidateGatewayControllerName(t *testing.T) {
 		},
 		{
 			name:   "invalid - lacks path",
-			value:  "k8s-gateway.nginx.org",
+			value:  "gateway.nginx.org",
 			expErr: true,
 		},
 		{
 			name:   "invalid - lacks path, only slash is present",
-			value:  "k8s-gateway.nginx.org/",
+			value:  "gateway.nginx.org/",
 			expErr: true,
 		},
 		{
@@ -52,7 +52,7 @@ func TestValidateGatewayControllerName(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			g := NewGomegaWithT(t)
+			g := NewWithT(t)
 
 			err := validateGatewayControllerName(test.value)
 
@@ -115,7 +115,7 @@ func TestValidateResourceName(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			g := NewGomegaWithT(t)
+			g := NewWithT(t)
 
 			err := validateResourceName(test.value)
 
@@ -178,7 +178,7 @@ func TestValidateNamespaceName(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			g := NewGomegaWithT(t)
+			g := NewWithT(t)
 
 			err := validateNamespaceName(test.value)
 
@@ -240,7 +240,7 @@ func TestParseNamespacedResourceName(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			g := NewGomegaWithT(t)
+			g := NewWithT(t)
 
 			nsName, err := parseNamespacedResourceName(test.value)
 
@@ -250,6 +250,130 @@ func TestParseNamespacedResourceName(t *testing.T) {
 			} else {
 				g.Expect(err).ToNot(HaveOccurred())
 				g.Expect(nsName).To(Equal(test.expectedNsName))
+			}
+		})
+	}
+}
+
+func TestValidateQualifiedName(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  string
+		expErr bool
+	}{
+		{
+			name:   "valid",
+			value:  "myName",
+			expErr: false,
+		},
+		{
+			name:   "valid with hyphen",
+			value:  "my-name",
+			expErr: false,
+		},
+		{
+			name:   "valid with numbers",
+			value:  "myName123",
+			expErr: false,
+		},
+		{
+			name:   "valid with '/'",
+			value:  "my/name",
+			expErr: false,
+		},
+		{
+			name:   "valid with '.'",
+			value:  "my.name",
+			expErr: false,
+		},
+		{
+			name:   "empty",
+			value:  "",
+			expErr: true,
+		},
+		{
+			name:   "invalid character '$'",
+			value:  "myName$",
+			expErr: true,
+		},
+		{
+			name:   "invalid character '^'",
+			value:  "my^Name",
+			expErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			err := validateQualifiedName(test.value)
+			if test.expErr {
+				g.Expect(err).To(HaveOccurred())
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+			}
+		})
+	}
+}
+
+func TestValidateURL(t *testing.T) {
+	tests := []struct {
+		name   string
+		url    string
+		expErr bool
+	}{
+		{
+			name:   "valid",
+			url:    "http://server.com",
+			expErr: false,
+		},
+		{
+			name:   "valid https",
+			url:    "https://server.com",
+			expErr: false,
+		},
+		{
+			name:   "valid with port",
+			url:    "http://server.com:8080",
+			expErr: false,
+		},
+		{
+			name:   "valid with ip address",
+			url:    "http://10.0.0.1",
+			expErr: false,
+		},
+		{
+			name:   "valid with ip address and port",
+			url:    "http://10.0.0.1:8080",
+			expErr: false,
+		},
+		{
+			name:   "invalid scheme",
+			url:    "http//server.com",
+			expErr: true,
+		},
+		{
+			name:   "no scheme",
+			url:    "server.com",
+			expErr: true,
+		},
+		{
+			name:   "no domain",
+			url:    "http://",
+			expErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			err := validateURL(tc.url)
+			if !tc.expErr {
+				g.Expect(err).ToNot(HaveOccurred())
+			} else {
+				g.Expect(err).To(HaveOccurred())
 			}
 		})
 	}
@@ -283,7 +407,7 @@ func TestValidateIP(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			g := NewGomegaWithT(t)
+			g := NewWithT(t)
 
 			err := validateIP(tc.ip)
 			if !tc.expErr {
@@ -293,4 +417,115 @@ func TestValidateIP(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateEndpoint(t *testing.T) {
+	tests := []struct {
+		name   string
+		endp   string
+		expErr bool
+	}{
+		{
+			name:   "valid endpoint with hostname",
+			endp:   "localhost:8080",
+			expErr: false,
+		},
+		{
+			name:   "valid endpoint with IPv4",
+			endp:   "1.2.3.4:8080",
+			expErr: false,
+		},
+		{
+			name:   "valid endpoint with IPv6",
+			endp:   "[::1]:8080",
+			expErr: false,
+		},
+		{
+			name:   "invalid port - 1",
+			endp:   "localhost:0",
+			expErr: true,
+		},
+		{
+			name:   "invalid port - 2",
+			endp:   "localhost:65536",
+			expErr: true,
+		},
+		{
+			name:   "missing port with hostname",
+			endp:   "localhost",
+			expErr: true,
+		},
+		{
+			name:   "missing port with IPv4",
+			endp:   "1.2.3.4",
+			expErr: true,
+		},
+		{
+			name:   "missing port with IPv6",
+			endp:   "[::1]",
+			expErr: true,
+		},
+		{
+			name:   "invalid hostname or IP",
+			endp:   "loc@lhost:8080",
+			expErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			err := validateEndpoint(tc.endp)
+			if !tc.expErr {
+				g.Expect(err).ToNot(HaveOccurred())
+			} else {
+				g.Expect(err).To(HaveOccurred())
+			}
+		})
+	}
+}
+
+func TestValidatePort(t *testing.T) {
+	tests := []struct {
+		name   string
+		port   int
+		expErr bool
+	}{
+		{
+			name:   "port under minimum allowed value",
+			port:   1023,
+			expErr: true,
+		},
+		{
+			name:   "port over maximum allowed value",
+			port:   65536,
+			expErr: true,
+		},
+		{
+			name:   "valid port",
+			port:   9113,
+			expErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			err := validatePort(tc.port)
+			if !tc.expErr {
+				g.Expect(err).ToNot(HaveOccurred())
+			} else {
+				g.Expect(err).To(HaveOccurred())
+			}
+		})
+	}
+}
+
+func TestEnsureNoPortCollisions(t *testing.T) {
+	g := NewWithT(t)
+
+	g.Expect(ensureNoPortCollisions(9113, 8081)).To(Succeed())
+	g.Expect(ensureNoPortCollisions(9113, 9113)).ToNot(Succeed())
 }

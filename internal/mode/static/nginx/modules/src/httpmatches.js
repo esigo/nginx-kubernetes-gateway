@@ -1,3 +1,5 @@
+import qs from 'querystring';
+
 const MATCHES_VARIABLE = 'http_matches';
 const HTTP_CODES = {
   notFound: 404,

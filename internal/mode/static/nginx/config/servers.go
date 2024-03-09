@@ -6,10 +6,8 @@ import (
 	"strings"
 	gotemplate "text/template"
 
-	"sigs.k8s.io/gateway-api/apis/v1beta1"
-
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/nginx/config/http"
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/state/dataplane"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/nginx/config/http"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/state/dataplane"
 )
 
 var serversTemplate = gotemplate.Must(gotemplate.New("servers").Parse(serversTemplateText))
@@ -19,6 +17,26 @@ const (
 	HeaderMatchSeparator = ":"
 	rootPath             = "/"
 )
+
+// baseHeaders contains the constant headers set in each server block
+var baseHeaders = []http.Header{
+	{
+		Name:  "Host",
+		Value: "$gw_api_compliant_host",
+	},
+	{
+		Name:  "X-Forwarded-For",
+		Value: "$proxy_add_x_forwarded_for",
+	},
+	{
+		Name:  "Upgrade",
+		Value: "$http_upgrade",
+	},
+	{
+		Name:  "Connection",
+		Value: "$connection_upgrade",
+	},
+}
 
 func executeServers(conf dataplane.Configuration) []byte {
 	servers := createServers(conf.HTTPServers, conf.SSLServers)
@@ -74,12 +92,19 @@ func createServer(virtualServer dataplane.VirtualServer) http.Server {
 	}
 }
 
+// rewriteConfig contains the configuration for a location to rewrite paths,
+// as specified in a URLRewrite filter
+type rewriteConfig struct {
+	// Rewrite rewrites the original URI to the new URI (ex: /coffee -> /beans)
+	Rewrite string
+}
+
 func createLocations(pathRules []dataplane.PathRule, listenerPort int32) []http.Location {
 	maxLocs, pathsAndTypes := getMaxLocationCountAndPathMap(pathRules)
 	locs := make([]http.Location, 0, maxLocs)
 	var rootPathExists bool
 
-	for _, rule := range pathRules {
+	for pathRuleIdx, rule := range pathRules {
 		matches := make([]httpMatch, 0, len(rule.MatchRules))
 
 		if rule.Path == rootPath {
@@ -89,51 +114,14 @@ func createLocations(pathRules []dataplane.PathRule, listenerPort int32) []http.
 		extLocations := initializeExternalLocations(rule, pathsAndTypes)
 
 		for matchRuleIdx, r := range rule.MatchRules {
-			m := r.GetMatch()
-
 			buildLocations := extLocations
-			if len(rule.MatchRules) != 1 || !isPathOnlyMatch(m) {
-				intLocation, match := initializeInternalLocation(rule, matchRuleIdx, m)
+			if len(rule.MatchRules) != 1 || !isPathOnlyMatch(r.Match) {
+				intLocation, match := initializeInternalLocation(pathRuleIdx, matchRuleIdx, r.Match)
 				buildLocations = []http.Location{intLocation}
 				matches = append(matches, match)
 			}
 
-			if r.Filters.InvalidFilter != nil {
-				for i := range buildLocations {
-					buildLocations[i].Return = &http.Return{Code: http.StatusInternalServerError}
-				}
-				locs = append(locs, buildLocations...)
-				continue
-			}
-
-			// There could be a case when the filter has the type set but not the corresponding field.
-			// For example, type is v1beta1.HTTPRouteFilterRequestRedirect, but RequestRedirect field is nil.
-			// The imported Webhook validation webhook catches that.
-
-			// FIXME(pleshakov): Ensure dataplane.Configuration -related types don't include v1beta1 types, so that
-			// we don't need to make any assumptions like above here. After fixing this, ensure that there is a test
-			// for checking the imported Webhook validation catches the case above.
-			// https://github.com/nginxinc/nginx-kubernetes-gateway/issues/660
-
-			// RequestRedirect and proxying are mutually exclusive.
-			if r.Filters.RequestRedirect != nil {
-				ret := createReturnValForRedirectFilter(r.Filters.RequestRedirect, listenerPort)
-				for i := range buildLocations {
-					buildLocations[i].Return = ret
-				}
-				locs = append(locs, buildLocations...)
-				continue
-			}
-
-			proxySetHeaders := generateProxySetHeaders(r.Filters.RequestHeaderModifiers)
-			for i := range buildLocations {
-				buildLocations[i].ProxySetHeaders = proxySetHeaders
-			}
-
-			proxyPass := createProxyPass(r.BackendGroup)
-			for i := range buildLocations {
-				buildLocations[i].ProxyPass = proxyPass
-			}
+			buildLocations = updateLocationsForFilters(r.Filters, buildLocations, r, listenerPort, rule.Path)
 			locs = append(locs, buildLocations...)
 		}
 
@@ -226,22 +214,105 @@ func initializeExternalLocations(
 }
 
 func initializeInternalLocation(
-	rule dataplane.PathRule,
+	pathruleIdx,
 	matchRuleIdx int,
-	match v1beta1.HTTPRouteMatch,
+	match dataplane.Match,
 ) (http.Location, httpMatch) {
-	path := createPathForMatch(rule.Path, rule.PathType, matchRuleIdx)
+	path := fmt.Sprintf("@rule%d-route%d", pathruleIdx, matchRuleIdx)
 	return createMatchLocation(path), createHTTPMatch(match, path)
 }
 
-func createReturnValForRedirectFilter(filter *v1beta1.HTTPRequestRedirectFilter, listenerPort int32) *http.Return {
+// updateLocationsForFilters updates the existing locations with any relevant filters.
+func updateLocationsForFilters(
+	filters dataplane.HTTPFilters,
+	buildLocations []http.Location,
+	matchRule dataplane.MatchRule,
+	listenerPort int32,
+	path string,
+) []http.Location {
+	if filters.InvalidFilter != nil {
+		for i := range buildLocations {
+			buildLocations[i].Return = &http.Return{Code: http.StatusInternalServerError}
+		}
+		return buildLocations
+	}
+
+	if filters.RequestRedirect != nil {
+		ret := createReturnValForRedirectFilter(filters.RequestRedirect, listenerPort)
+		for i := range buildLocations {
+			buildLocations[i].Return = ret
+		}
+		return buildLocations
+	}
+
+	rewrites := createRewritesValForRewriteFilter(filters.RequestURLRewrite, path)
+	proxySetHeaders := generateProxySetHeaders(&matchRule.Filters)
+	for i := range buildLocations {
+		if rewrites != nil {
+			if rewrites.Rewrite != "" {
+				buildLocations[i].Rewrites = append(buildLocations[i].Rewrites, rewrites.Rewrite)
+			}
+		}
+		buildLocations[i].ProxySetHeaders = proxySetHeaders
+		buildLocations[i].ProxySSLVerify = createProxyTLSFromBackends(matchRule.BackendGroup.Backends)
+		proxyPass := createProxyPass(
+			matchRule.BackendGroup,
+			matchRule.Filters.RequestURLRewrite,
+			generateProtocolString(buildLocations[i].ProxySSLVerify),
+		)
+		buildLocations[i].ProxyPass = proxyPass
+	}
+
+	return buildLocations
+}
+
+func generateProtocolString(ssl *http.ProxySSLVerify) string {
+	if ssl != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func createProxyTLSFromBackends(backends []dataplane.Backend) *http.ProxySSLVerify {
+	if len(backends) == 0 {
+		return nil
+	}
+	for _, b := range backends {
+		proxyVerify := createProxySSLVerify(b.VerifyTLS)
+		if proxyVerify != nil {
+			// If any backend has a backend TLS policy defined, then we use that for the proxy SSL verification.
+			// We require that all backends in a group have the same backend TLS policy.
+			// Verification that all backends in a group have the same backend TLS policy is done in the graph package.
+			return proxyVerify
+		}
+	}
+	return nil
+}
+
+func createProxySSLVerify(v *dataplane.VerifyTLS) *http.ProxySSLVerify {
+	if v == nil {
+		return nil
+	}
+	var trustedCert string
+	if v.CertBundleID != "" {
+		trustedCert = generateCertBundleFileName(v.CertBundleID)
+	} else {
+		trustedCert = v.RootCAPath
+	}
+	return &http.ProxySSLVerify{
+		TrustedCertificate: trustedCert,
+		Name:               v.Hostname,
+	}
+}
+
+func createReturnValForRedirectFilter(filter *dataplane.HTTPRequestRedirectFilter, listenerPort int32) *http.Return {
 	if filter == nil {
 		return nil
 	}
 
 	hostname := "$host"
 	if filter.Hostname != nil {
-		hostname = string(*filter.Hostname)
+		hostname = *filter.Hostname
 	}
 
 	code := http.StatusFound
@@ -251,7 +322,7 @@ func createReturnValForRedirectFilter(filter *v1beta1.HTTPRequestRedirectFilter,
 
 	port := listenerPort
 	if filter.Port != nil {
-		port = int32(*filter.Port)
+		port = *filter.Port
 	}
 
 	hostnamePort := fmt.Sprintf("%s:%d", hostname, port)
@@ -279,6 +350,48 @@ func createReturnValForRedirectFilter(filter *v1beta1.HTTPRequestRedirectFilter,
 	}
 }
 
+func createRewritesValForRewriteFilter(filter *dataplane.HTTPURLRewriteFilter, path string) *rewriteConfig {
+	if filter == nil {
+		return nil
+	}
+
+	rewrites := &rewriteConfig{}
+
+	if filter.Path != nil {
+		switch filter.Path.Type {
+		case dataplane.ReplaceFullPath:
+			rewrites.Rewrite = fmt.Sprintf("^ %s break", filter.Path.Replacement)
+		case dataplane.ReplacePrefixMatch:
+			filterPrefix := filter.Path.Replacement
+			if filterPrefix == "" {
+				filterPrefix = "/"
+			}
+
+			// capture everything after the configured prefix
+			regex := fmt.Sprintf("^%s(.*)$", path)
+			// replace the configured prefix with the filter prefix and append what was captured
+			replacement := fmt.Sprintf("%s$1", filterPrefix)
+
+			// if configured prefix does not end in /, but replacement prefix does end in /,
+			// then make sure that we *require* but *don't capture* a trailing slash in the request,
+			// otherwise we'll get duplicate slashes in the full replacement
+			if strings.HasSuffix(filterPrefix, "/") && !strings.HasSuffix(path, "/") {
+				regex = fmt.Sprintf("^%s(?:/(.*))?$", path)
+			}
+
+			// if configured prefix ends in / we won't capture it for a request (since it's not in the regex),
+			// so append it to the replacement prefix if the replacement prefix doesn't already end in /
+			if strings.HasSuffix(path, "/") && !strings.HasSuffix(filterPrefix, "/") {
+				replacement = fmt.Sprintf("%s/$1", filterPrefix)
+			}
+
+			rewrites.Rewrite = fmt.Sprintf("%s %s break", regex, replacement)
+		}
+	}
+
+	return rewrites
+}
+
 // httpMatch is an internal representation of an HTTPRouteMatch.
 // This struct is marshaled into a string and stored as a variable in the nginx location block for the route's path.
 // The NJS httpmatches module will look up this variable on the request object and compare the request against the
@@ -286,7 +399,7 @@ func createReturnValForRedirectFilter(filter *v1beta1.HTTPRequestRedirectFilter,
 // If the request satisfies the httpMatch, NGINX will redirect the request to the location RedirectPath.
 type httpMatch struct {
 	// Method is the HTTPMethod of the HTTPRouteMatch.
-	Method v1beta1.HTTPMethod `json:"method,omitempty"`
+	Method string `json:"method,omitempty"`
 	// RedirectPath is the path to redirect the request to if the request satisfies the match conditions.
 	RedirectPath string `json:"redirectPath,omitempty"`
 	// Headers is a list of HTTPHeaders name value pairs with the format "{name}:{value}".
@@ -297,7 +410,7 @@ type httpMatch struct {
 	Any bool `json:"any,omitempty"`
 }
 
-func createHTTPMatch(match v1beta1.HTTPRouteMatch, redirectPath string) httpMatch {
+func createHTTPMatch(match dataplane.Match, redirectPath string) httpMatch {
 	hm := httpMatch{
 		RedirectPath: redirectPath,
 	}
@@ -316,14 +429,12 @@ func createHTTPMatch(match v1beta1.HTTPRouteMatch, redirectPath string) httpMatc
 		headerNames := make(map[string]struct{})
 
 		for _, h := range match.Headers {
-			if *h.Type == v1beta1.HeaderMatchExact {
-				// duplicate header names are not permitted by the spec
-				// only configure the first entry for every header name (case-insensitive)
-				lowerName := strings.ToLower(string(h.Name))
-				if _, ok := headerNames[lowerName]; !ok {
-					headers = append(headers, createHeaderKeyValString(h))
-					headerNames[lowerName] = struct{}{}
-				}
+			// duplicate header names are not permitted by the spec
+			// only configure the first entry for every header name (case-insensitive)
+			lowerName := strings.ToLower(h.Name)
+			if _, ok := headerNames[lowerName]; !ok {
+				headers = append(headers, createHeaderKeyValString(h))
+				headerNames[lowerName] = struct{}{}
 			}
 		}
 		hm.Headers = headers
@@ -333,9 +444,7 @@ func createHTTPMatch(match v1beta1.HTTPRouteMatch, redirectPath string) httpMatc
 		params := make([]string, 0, len(match.QueryParams))
 
 		for _, p := range match.QueryParams {
-			if *p.Type == v1beta1.QueryParamMatchExact {
-				params = append(params, createQueryParamKeyValString(p))
-			}
+			params = append(params, createQueryParamKeyValString(p))
 		}
 		hm.QueryParams = params
 	}
@@ -345,8 +454,8 @@ func createHTTPMatch(match v1beta1.HTTPRouteMatch, redirectPath string) httpMatc
 
 // The name and values are delimited by "=". A name and value can always be recovered using strings.SplitN(arg,"=", 2).
 // Query Parameters are case-sensitive so case is preserved.
-func createQueryParamKeyValString(p v1beta1.HTTPQueryParamMatch) string {
-	return string(p.Name) + "=" + p.Value
+func createQueryParamKeyValString(p dataplane.HTTPQueryParamMatch) string {
+	return p.Name + "=" + p.Value
 }
 
 // The name and values are delimited by ":". A name and value can always be recovered using strings.Split(arg, ":").
@@ -354,51 +463,76 @@ func createQueryParamKeyValString(p v1beta1.HTTPQueryParamMatch) string {
 // Ex. foo:bar == FOO:bar, but foo:bar != foo:BAR,
 // We preserve the case of the name here because NGINX allows us to look up the header names in a case-insensitive
 // manner.
-func createHeaderKeyValString(h v1beta1.HTTPHeaderMatch) string {
-	return string(h.Name) + HeaderMatchSeparator + h.Value
+func createHeaderKeyValString(h dataplane.HTTPHeaderMatch) string {
+	return h.Name + HeaderMatchSeparator + h.Value
 }
 
-func isPathOnlyMatch(match v1beta1.HTTPRouteMatch) bool {
-	return match.Method == nil && match.Headers == nil && match.QueryParams == nil
+func isPathOnlyMatch(match dataplane.Match) bool {
+	return match.Method == nil && len(match.Headers) == 0 && len(match.QueryParams) == 0
 }
 
-func createProxyPass(backendGroup dataplane.BackendGroup) string {
-	backendName := backendGroupName(backendGroup)
-	if backendGroupNeedsSplit(backendGroup) {
-		return "http://$" + convertStringToSafeVariableName(backendName)
+func createProxyPass(
+	backendGroup dataplane.BackendGroup,
+	filter *dataplane.HTTPURLRewriteFilter,
+	protocol string,
+) string {
+	var requestURI string
+	if filter == nil || filter.Path == nil {
+		requestURI = "$request_uri"
 	}
 
-	return "http://" + backendName
+	backendName := backendGroupName(backendGroup)
+	if backendGroupNeedsSplit(backendGroup) {
+		return protocol + "://$" + convertStringToSafeVariableName(backendName) + requestURI
+	}
+
+	return protocol + "://" + backendName + requestURI
 }
 
 func createMatchLocation(path string) http.Location {
 	return http.Location{
-		Path:     path,
-		Internal: true,
+		Path: path,
 	}
 }
 
-func generateProxySetHeaders(filters *dataplane.HTTPHeaderFilter) []http.Header {
-	if filters == nil {
-		return nil
+func generateProxySetHeaders(filters *dataplane.HTTPFilters) []http.Header {
+	headers := make([]http.Header, len(baseHeaders))
+	copy(headers, baseHeaders)
+
+	if filters != nil && filters.RequestURLRewrite != nil && filters.RequestURLRewrite.Hostname != nil {
+		for i, header := range headers {
+			if header.Name == "Host" {
+				headers[i].Value = *filters.RequestURLRewrite.Hostname
+				break
+			}
+		}
 	}
-	proxySetHeaders := make([]http.Header, 0, len(filters.Add)+len(filters.Set)+len(filters.Remove))
-	if len(filters.Add) > 0 {
-		addHeaders := convertAddHeaders(filters.Add)
+
+	if filters == nil || filters.RequestHeaderModifiers == nil {
+		return headers
+	}
+
+	headerFilter := filters.RequestHeaderModifiers
+
+	headerLen := len(headerFilter.Add) + len(headerFilter.Set) + len(headerFilter.Remove) + len(headers)
+	proxySetHeaders := make([]http.Header, 0, headerLen)
+	if len(headerFilter.Add) > 0 {
+		addHeaders := convertAddHeaders(headerFilter.Add)
 		proxySetHeaders = append(proxySetHeaders, addHeaders...)
 	}
-	if len(filters.Set) > 0 {
-		setHeaders := convertSetHeaders(filters.Set)
+	if len(headerFilter.Set) > 0 {
+		setHeaders := convertSetHeaders(headerFilter.Set)
 		proxySetHeaders = append(proxySetHeaders, setHeaders...)
 	}
 	// If the value of a header field is an empty string then this field will not be passed to a proxied server
-	for _, h := range filters.Remove {
+	for _, h := range headerFilter.Remove {
 		proxySetHeaders = append(proxySetHeaders, http.Header{
 			Name:  h,
 			Value: "",
 		})
 	}
-	return proxySetHeaders
+
+	return append(proxySetHeaders, headers...)
 }
 
 func convertAddHeaders(headers []dataplane.HTTPHeader) []http.Header {
@@ -427,7 +561,7 @@ func convertSetHeaders(headers []dataplane.HTTPHeader) []http.Header {
 func convertMatchesToString(matches []httpMatch) string {
 	// FIXME(sberman): De-dupe matches and associated locations
 	// so we don't need nginx/njs to perform unnecessary matching.
-	// https://github.com/nginxinc/nginx-kubernetes-gateway/issues/662
+	// https://github.com/nginxinc/nginx-gateway-fabric/issues/662
 	b, err := json.Marshal(matches)
 	if err != nil {
 		// panic is safe here because we should never fail to marshal the match unless we constructed it incorrectly.
@@ -449,10 +583,6 @@ func createPath(rule dataplane.PathRule) string {
 	default:
 		return rule.Path
 	}
-}
-
-func createPathForMatch(path string, pathType dataplane.PathType, routeIdx int) string {
-	return fmt.Sprintf("%s_%s_route%d", path, pathType, routeIdx)
 }
 
 func createDefaultRootLocation() http.Location {

@@ -5,14 +5,38 @@ import (
 	"context"
 	"sync"
 
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/nginx/runtime"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/nginx/runtime"
+	"github.com/nginxinc/nginx-plus-go-client/client"
 )
 
 type FakeManager struct {
-	ReloadStub        func(context.Context) error
+	GetUpstreamsStub        func() (client.Upstreams, error)
+	getUpstreamsMutex       sync.RWMutex
+	getUpstreamsArgsForCall []struct {
+	}
+	getUpstreamsReturns struct {
+		result1 client.Upstreams
+		result2 error
+	}
+	getUpstreamsReturnsOnCall map[int]struct {
+		result1 client.Upstreams
+		result2 error
+	}
+	IsPlusStub        func() bool
+	isPlusMutex       sync.RWMutex
+	isPlusArgsForCall []struct {
+	}
+	isPlusReturns struct {
+		result1 bool
+	}
+	isPlusReturnsOnCall map[int]struct {
+		result1 bool
+	}
+	ReloadStub        func(context.Context, int) error
 	reloadMutex       sync.RWMutex
 	reloadArgsForCall []struct {
 		arg1 context.Context
+		arg2 int
 	}
 	reloadReturns struct {
 		result1 error
@@ -20,22 +44,144 @@ type FakeManager struct {
 	reloadReturnsOnCall map[int]struct {
 		result1 error
 	}
+	UpdateHTTPServersStub        func(string, []client.UpstreamServer) error
+	updateHTTPServersMutex       sync.RWMutex
+	updateHTTPServersArgsForCall []struct {
+		arg1 string
+		arg2 []client.UpstreamServer
+	}
+	updateHTTPServersReturns struct {
+		result1 error
+	}
+	updateHTTPServersReturnsOnCall map[int]struct {
+		result1 error
+	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
 }
 
-func (fake *FakeManager) Reload(arg1 context.Context) error {
+func (fake *FakeManager) GetUpstreams() (client.Upstreams, error) {
+	fake.getUpstreamsMutex.Lock()
+	ret, specificReturn := fake.getUpstreamsReturnsOnCall[len(fake.getUpstreamsArgsForCall)]
+	fake.getUpstreamsArgsForCall = append(fake.getUpstreamsArgsForCall, struct {
+	}{})
+	stub := fake.GetUpstreamsStub
+	fakeReturns := fake.getUpstreamsReturns
+	fake.recordInvocation("GetUpstreams", []interface{}{})
+	fake.getUpstreamsMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeManager) GetUpstreamsCallCount() int {
+	fake.getUpstreamsMutex.RLock()
+	defer fake.getUpstreamsMutex.RUnlock()
+	return len(fake.getUpstreamsArgsForCall)
+}
+
+func (fake *FakeManager) GetUpstreamsCalls(stub func() (client.Upstreams, error)) {
+	fake.getUpstreamsMutex.Lock()
+	defer fake.getUpstreamsMutex.Unlock()
+	fake.GetUpstreamsStub = stub
+}
+
+func (fake *FakeManager) GetUpstreamsReturns(result1 client.Upstreams, result2 error) {
+	fake.getUpstreamsMutex.Lock()
+	defer fake.getUpstreamsMutex.Unlock()
+	fake.GetUpstreamsStub = nil
+	fake.getUpstreamsReturns = struct {
+		result1 client.Upstreams
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeManager) GetUpstreamsReturnsOnCall(i int, result1 client.Upstreams, result2 error) {
+	fake.getUpstreamsMutex.Lock()
+	defer fake.getUpstreamsMutex.Unlock()
+	fake.GetUpstreamsStub = nil
+	if fake.getUpstreamsReturnsOnCall == nil {
+		fake.getUpstreamsReturnsOnCall = make(map[int]struct {
+			result1 client.Upstreams
+			result2 error
+		})
+	}
+	fake.getUpstreamsReturnsOnCall[i] = struct {
+		result1 client.Upstreams
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeManager) IsPlus() bool {
+	fake.isPlusMutex.Lock()
+	ret, specificReturn := fake.isPlusReturnsOnCall[len(fake.isPlusArgsForCall)]
+	fake.isPlusArgsForCall = append(fake.isPlusArgsForCall, struct {
+	}{})
+	stub := fake.IsPlusStub
+	fakeReturns := fake.isPlusReturns
+	fake.recordInvocation("IsPlus", []interface{}{})
+	fake.isPlusMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeManager) IsPlusCallCount() int {
+	fake.isPlusMutex.RLock()
+	defer fake.isPlusMutex.RUnlock()
+	return len(fake.isPlusArgsForCall)
+}
+
+func (fake *FakeManager) IsPlusCalls(stub func() bool) {
+	fake.isPlusMutex.Lock()
+	defer fake.isPlusMutex.Unlock()
+	fake.IsPlusStub = stub
+}
+
+func (fake *FakeManager) IsPlusReturns(result1 bool) {
+	fake.isPlusMutex.Lock()
+	defer fake.isPlusMutex.Unlock()
+	fake.IsPlusStub = nil
+	fake.isPlusReturns = struct {
+		result1 bool
+	}{result1}
+}
+
+func (fake *FakeManager) IsPlusReturnsOnCall(i int, result1 bool) {
+	fake.isPlusMutex.Lock()
+	defer fake.isPlusMutex.Unlock()
+	fake.IsPlusStub = nil
+	if fake.isPlusReturnsOnCall == nil {
+		fake.isPlusReturnsOnCall = make(map[int]struct {
+			result1 bool
+		})
+	}
+	fake.isPlusReturnsOnCall[i] = struct {
+		result1 bool
+	}{result1}
+}
+
+func (fake *FakeManager) Reload(arg1 context.Context, arg2 int) error {
 	fake.reloadMutex.Lock()
 	ret, specificReturn := fake.reloadReturnsOnCall[len(fake.reloadArgsForCall)]
 	fake.reloadArgsForCall = append(fake.reloadArgsForCall, struct {
 		arg1 context.Context
-	}{arg1})
+		arg2 int
+	}{arg1, arg2})
 	stub := fake.ReloadStub
 	fakeReturns := fake.reloadReturns
-	fake.recordInvocation("Reload", []interface{}{arg1})
+	fake.recordInvocation("Reload", []interface{}{arg1, arg2})
 	fake.reloadMutex.Unlock()
 	if stub != nil {
-		return stub(arg1)
+		return stub(arg1, arg2)
 	}
 	if specificReturn {
 		return ret.result1
@@ -49,17 +195,17 @@ func (fake *FakeManager) ReloadCallCount() int {
 	return len(fake.reloadArgsForCall)
 }
 
-func (fake *FakeManager) ReloadCalls(stub func(context.Context) error) {
+func (fake *FakeManager) ReloadCalls(stub func(context.Context, int) error) {
 	fake.reloadMutex.Lock()
 	defer fake.reloadMutex.Unlock()
 	fake.ReloadStub = stub
 }
 
-func (fake *FakeManager) ReloadArgsForCall(i int) context.Context {
+func (fake *FakeManager) ReloadArgsForCall(i int) (context.Context, int) {
 	fake.reloadMutex.RLock()
 	defer fake.reloadMutex.RUnlock()
 	argsForCall := fake.reloadArgsForCall[i]
-	return argsForCall.arg1
+	return argsForCall.arg1, argsForCall.arg2
 }
 
 func (fake *FakeManager) ReloadReturns(result1 error) {
@@ -85,11 +231,84 @@ func (fake *FakeManager) ReloadReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeManager) UpdateHTTPServers(arg1 string, arg2 []client.UpstreamServer) error {
+	var arg2Copy []client.UpstreamServer
+	if arg2 != nil {
+		arg2Copy = make([]client.UpstreamServer, len(arg2))
+		copy(arg2Copy, arg2)
+	}
+	fake.updateHTTPServersMutex.Lock()
+	ret, specificReturn := fake.updateHTTPServersReturnsOnCall[len(fake.updateHTTPServersArgsForCall)]
+	fake.updateHTTPServersArgsForCall = append(fake.updateHTTPServersArgsForCall, struct {
+		arg1 string
+		arg2 []client.UpstreamServer
+	}{arg1, arg2Copy})
+	stub := fake.UpdateHTTPServersStub
+	fakeReturns := fake.updateHTTPServersReturns
+	fake.recordInvocation("UpdateHTTPServers", []interface{}{arg1, arg2Copy})
+	fake.updateHTTPServersMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeManager) UpdateHTTPServersCallCount() int {
+	fake.updateHTTPServersMutex.RLock()
+	defer fake.updateHTTPServersMutex.RUnlock()
+	return len(fake.updateHTTPServersArgsForCall)
+}
+
+func (fake *FakeManager) UpdateHTTPServersCalls(stub func(string, []client.UpstreamServer) error) {
+	fake.updateHTTPServersMutex.Lock()
+	defer fake.updateHTTPServersMutex.Unlock()
+	fake.UpdateHTTPServersStub = stub
+}
+
+func (fake *FakeManager) UpdateHTTPServersArgsForCall(i int) (string, []client.UpstreamServer) {
+	fake.updateHTTPServersMutex.RLock()
+	defer fake.updateHTTPServersMutex.RUnlock()
+	argsForCall := fake.updateHTTPServersArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeManager) UpdateHTTPServersReturns(result1 error) {
+	fake.updateHTTPServersMutex.Lock()
+	defer fake.updateHTTPServersMutex.Unlock()
+	fake.UpdateHTTPServersStub = nil
+	fake.updateHTTPServersReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeManager) UpdateHTTPServersReturnsOnCall(i int, result1 error) {
+	fake.updateHTTPServersMutex.Lock()
+	defer fake.updateHTTPServersMutex.Unlock()
+	fake.UpdateHTTPServersStub = nil
+	if fake.updateHTTPServersReturnsOnCall == nil {
+		fake.updateHTTPServersReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.updateHTTPServersReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
 func (fake *FakeManager) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
+	fake.getUpstreamsMutex.RLock()
+	defer fake.getUpstreamsMutex.RUnlock()
+	fake.isPlusMutex.RLock()
+	defer fake.isPlusMutex.RUnlock()
 	fake.reloadMutex.RLock()
 	defer fake.reloadMutex.RUnlock()
+	fake.updateHTTPServersMutex.RLock()
+	defer fake.updateHTTPServersMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}
 	for key, value := range fake.invocations {
 		copiedInvocations[key] = value

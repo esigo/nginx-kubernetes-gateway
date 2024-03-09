@@ -19,9 +19,20 @@ Closes #ISSUE
 
 Before creating a PR, run through this checklist and mark each as complete.
 
-- [ ] I have read the [CONTRIBUTING](https://github.com/nginxinc/nginx-kubernetes-gateway/blob/main/CONTRIBUTING.md) doc
+- [ ] I have read the [CONTRIBUTING](https://github.com/nginxinc/nginx-gateway-fabric/blob/main/CONTRIBUTING.md) doc
 - [ ] I have added tests that prove my fix is effective or that my feature works
 - [ ] I have checked that all unit tests pass after adding my changes
 - [ ] I have updated necessary documentation
 - [ ] I have rebased my branch onto main
 - [ ] I will ensure my PR is targeting the main branch and pulling from my branch from my own fork
+
+### Release notes
+
+If this PR introduces a change that affects users and needs to be mentioned in the [release notes](../CHANGELOG.md),
+please add a brief note that summarizes the change.
+
+<!-- If this PR does not require a release note, you can just write NONE in the release-note block below. -->
+
+```release-note
+
+```

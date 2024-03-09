@@ -23,22 +23,6 @@ func TestValidateRedirectScheme(t *testing.T) {
 	)
 }
 
-func TestValidateRedirectHostname(t *testing.T) {
-	validator := HTTPRedirectValidator{}
-
-	testValidValuesForSimpleValidator(
-		t,
-		validator.ValidateRedirectHostname,
-		"example.com",
-	)
-
-	testInvalidValuesForSimpleValidator(
-		t,
-		validator.ValidateRedirectHostname,
-		"example.com$",
-	)
-}
-
 func TestValidateRedirectPort(t *testing.T) {
 	validator := HTTPRedirectValidator{}
 
@@ -67,6 +51,43 @@ func TestValidateRedirectStatusCode(t *testing.T) {
 	)
 }
 
+func TestValidateHostname(t *testing.T) {
+	validator := HTTPRedirectValidator{}
+
+	testValidValuesForSimpleValidator(
+		t,
+		validator.ValidateHostname,
+		"example.com",
+	)
+
+	testInvalidValuesForSimpleValidator(
+		t,
+		validator.ValidateHostname,
+		"example.com$",
+	)
+}
+
+func TestValidateRewritePath(t *testing.T) {
+	validator := HTTPURLRewriteValidator{}
+
+	testValidValuesForSimpleValidator(
+		t,
+		validator.ValidateRewritePath,
+		"",
+		"/path",
+		"/longer/path",
+		"/trailing/",
+	)
+
+	testInvalidValuesForSimpleValidator(
+		t,
+		validator.ValidateRewritePath,
+		"path",
+		"$path",
+		"/path$",
+	)
+}
+
 func TestValidateRequestHeaderName(t *testing.T) {
 	validator := HTTPRequestHeaderValidator{}
 
@@ -74,7 +95,7 @@ func TestValidateRequestHeaderName(t *testing.T) {
 		t,
 		validator.ValidateRequestHeaderName,
 		"Content-Encoding",
-		"Connection",
+		"MyBespokeHeader",
 	)
 
 	testInvalidValuesForSimpleValidator(t, validator.ValidateRequestHeaderName, "$Content-Encoding")

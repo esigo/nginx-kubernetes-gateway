@@ -14,7 +14,7 @@ practices to ensure a successful feature development process.
    visibility. If any discussions regarding the issue occur outside the issue thread, provide a summary of the
    conversation as a comment on the issue itself. This ensures that all relevant information and discussions are
    consolidated in one place for easy reference.
-3. **Fork the repo**: NKG follows a fork workflow, which you can learn more about in
+3. **Fork the repo**: NGF follows a fork workflow, which you can learn more about in
    the [branching and workflow](/docs/developer/branching-and-workflow.md) documentation.
 4. **Branch**: Create a branch following
    the [naming conventions](/docs/developer/branching-and-workflow.md#branch-naming-conventions).
@@ -32,19 +32,20 @@ practices to ensure a successful feature development process.
    the [testing](/docs/developer/testing.md#unit-test-guidelines) documentation.
 9. **Manually verify your changes**: Refer to the [manual testing](/docs/developer/testing.md#manual-testing) section of
    the testing documentation for instructions on how to manually test your changes.
-10. **Update any relevant documentation**: Here are some guidelines for updating documentation:
+10. **Update any relevant documentation**: See the [documentation](/docs/developer/documentation.md) guide for in-depth information about the workflow to update the docs and how we publish them.
+   Here are some basic guidelines for updating documentation:
     - **Gateway API Feature**: If you are implementing a Gateway API feature, make sure to update
-      the [Gateway API Compatibility](/docs/gateway-api-compatibility.md) documentation.
+      the [Gateway API Compatibility](/site/content/concepts/gateway-api-compatibility.md) documentation.
     - **New Use Case:** If your feature introduces a new use case, add an example of how to use it in
       the [examples](/examples) directory. This example will help users understand how to leverage the new feature.
       > For security, a Docker image used in an example must be either managed by F5/NGINX or be an [official image](https://docs.docker.com/docker-hub/official_images/).
-    - **Installation Changes**: If your feature involves changes to the installation process of NKG, update
-      the [installation](/docs/installation.md) documentation.
-    - **Helm Changes**: If your feature introduces or changes any values of the NKG Helm Chart, update the
+    - **Installation Changes**: If your feature involves changes to the installation process of NGF, update
+      the [installation](/site/content/how-to/installation/installation.md) documentation.
+    - **Helm Changes**: If your feature introduces or changes any values of the NGF Helm Chart, update the
       [Helm README](/deploy/helm-chart/README.md).
     - **Command-line Changes**: If your feature introduces or changes a command-line flag or subcommand, update
-      the [cli help](/docs/cli-help.md) documentation.
-    - **Other Documentation Updates**: For any other changes that affect the behavior, usage, or configuration of NKG,
+      the [cli help](/site/content/reference/cli-help.md) documentation.
+    - **Other Documentation Updates**: For any other changes that affect the behavior, usage, or configuration of NGF,
       review the existing documentation and update it as necessary. Ensure that the documentation remains accurate and
       up to date with the latest changes.
 11. **Lint code**: See the [run the linter](/docs/developer/quickstart.md#run-the-linter) section of the quickstart
@@ -53,12 +54,16 @@ practices to ensure a successful feature development process.
     [Update Generated Manifests](/docs/developer/quickstart.md#update-generated-manifests) sections of the
     quickstart guide for instructions.
 13. **Open pull request**: Open a pull request targeting the `main` branch of
-    the [nginx-kubernetes-gateway](https://github.com/nginxinc/nginx-kubernetes-gateway/tree/main) repository. The
-    entire `nginx-kubernetes-gateway` group will be automatically requested for review. If you have a specific or
+    the [nginx-gateway-fabric](https://github.com/nginxinc/nginx-gateway-fabric/tree/main) repository. The
+    entire `nginx-gateway-fabric` group will be automatically requested for review. If you have a specific or
     different reviewer in mind, you can request them as well. Refer to
     the [pull request](/docs/developer/pull-request.md) documentation for expectations and guidelines.
 14. **Obtain the necessary approvals**: Work with code reviewers to maintain the required number of approvals.
-15. **Squash and merge**: Squash your commits locally, or use the GitHub UI to squash and merge. Only one commit per
+15. **Ensure the product telemetry works**. If you made any changes to the product telemetry data points, it is
+    necessary to push the generated scheme (`.avdl`, generated in Step 12) to the scheme registry. After that, manually
+    verify that the product telemetry data is successfully pushed to the telemetry service by confirming that the data
+    has been received.
+16. **Squash and merge**: Squash your commits locally, or use the GitHub UI to squash and merge. Only one commit per
     pull request should be merged. Make sure the first line of the final commit message includes the pull request
     number. For example, Fix supported gateway conditions in compatibility doc (#674).
     > **Note**:

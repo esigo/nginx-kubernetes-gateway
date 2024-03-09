@@ -6,17 +6,17 @@ reference a Secret in a different Namespace.
 
 ## Running the Example
 
-## 1. Deploy NGINX Kubernetes Gateway
+## 1. Deploy NGINX Gateway Fabric
 
-1. Follow the [installation instructions](/docs/installation.md) to deploy NGINX Kubernetes Gateway.
+1. Follow the [installation instructions](https://docs.nginx.com/nginx-gateway-fabric/installation/) to deploy NGINX Gateway Fabric.
 
-1. Save the public IP address of NGINX Kubernetes Gateway into a shell variable:
+1. Save the public IP address of NGINX Gateway Fabric into a shell variable:
 
    ```text
    GW_IP=XXX.YYY.ZZZ.III
    ```
 
-1. Save the ports of NGINX Kubernetes Gateway:
+1. Save the ports of NGINX Gateway Fabric:
 
    ```text
    GW_HTTP_PORT=<http port number>
@@ -81,7 +81,7 @@ reference a Secret in a different Namespace.
 
    To configure HTTPS termination for our cafe application, we will bind our `coffee` and `tea` HTTPRoutes to
    the `https` listener in [cafe-routes.yaml](./cafe-routes.yaml) using
-   the [`parentReference`](https://gateway-api.sigs.k8s.io/references/spec/#gateway.networking.k8s.io/v1beta1.ParentReference)
+   the [`parentReference`](https://gateway-api.sigs.k8s.io/references/spec/#gateway.networking.k8s.io/v1.ParentReference)
    field:
 
    ```yaml
@@ -91,7 +91,7 @@ reference a Secret in a different Namespace.
    ```
 
    To configure an HTTPS redirect from port 80 to 443, we will bind the special `cafe-tls-redirect` HTTPRoute with
-   a [`HTTPRequestRedirectFilter`](https://gateway-api.sigs.k8s.io/references/spec/#gateway.networking.k8s.io/v1beta1.HTTPRequestRedirectFilter)
+   a [`HTTPRequestRedirectFilter`](https://gateway-api.sigs.k8s.io/references/spec/#gateway.networking.k8s.io/v1.HTTPRequestRedirectFilter)
    to the `http` listener:
 
    ```yaml
@@ -195,19 +195,19 @@ You can also check the conditions of the Gateway `https` Listener to verify the 
  Conditions:
    Last Transition Time:  2023-06-26T20:23:56Z
    Message:               Certificate ref to secret certificate/cafe-secret not permitted by any ReferenceGrant
-   Observed Generation:   2
+   Observed Generation:   1
    Reason:                RefNotPermitted
    Status:                False
    Type:                  Accepted
    Last Transition Time:  2023-06-26T20:23:56Z
    Message:               Certificate ref to secret certificate/cafe-secret not permitted by any ReferenceGrant
-   Observed Generation:   2
+   Observed Generation:   1
    Reason:                RefNotPermitted
    Status:                False
    Type:                  ResolvedRefs
    Last Transition Time:  2023-06-26T20:23:56Z
    Message:               Certificate ref to secret certificate/cafe-secret not permitted by any ReferenceGrant
-   Observed Generation:   2
+   Observed Generation:   1
    Reason:                Invalid
    Status:                False
    Type:                  Programmed

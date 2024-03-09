@@ -1,13 +1,19 @@
 # NGINX JavaScript Modules
 
-This directory contains the [njs](http://nginx.org/en/docs/njs/) modules for NGINX Kubernetes Gateway.
+This directory contains the [njs](http://nginx.org/en/docs/njs/) modules for NGINX Gateway Fabric.
 
 ## Prerequisites
 
 We recommend using [nvm](https://github.com/nvm-sh/nvm/blob/master/README.md) to install the following dependencies:
 
-- [Node.js](https://nodejs.org/en/) (version 1.18)
+- [Node.js](https://nodejs.org/en/) (version 20)
 - [npm](https://docs.npmjs.com/)
+
+If you use nvm, you can switch to the recommended version of Node.js by running:
+
+```shell
+nvm use
+```
 
 Once you've installed Node.js and npm, run `npm install` in this directory to install the rest of the project's
 dependencies.
@@ -111,10 +117,3 @@ This project uses [prettier](https://prettier.io/) to lint and format the JavaSc
 ```shell
 npm run format
 ```
-
-## Generate the ConfigMap yaml
-
-The NJS modules are mounted to the NGINX container using a ConfigMap. Once you have completed your code changes, ensure
-the [njs-modules.yaml](/deploy/manifests/njs-modules.yaml) and
-[NJS ConfigMap Helm template](/deploy/helm-chart/templates/njs-modules.yaml) are updated to reflect the new code. See
-[Update NJS module ConfigMaps](/docs/developer/quickstart.md#update-njs-module-configmaps).

@@ -6,11 +6,12 @@ import (
 	"time"
 
 	ctlr "sigs.k8s.io/controller-runtime"
+	ctlrBuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/framework/controller/index"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/framework/controller/index"
 )
 
 const (
@@ -23,6 +24,7 @@ type config struct {
 	k8sPredicate         predicate.Predicate
 	fieldIndices         index.FieldIndices
 	newReconciler        NewReconcilerFunc
+	onlyMetadata         bool
 }
 
 // NewReconcilerFunc defines a function that creates a new Reconciler. Used for unit-testing.
@@ -59,6 +61,16 @@ func WithNewReconciler(newReconciler NewReconcilerFunc) Option {
 	}
 }
 
+// WithOnlyMetadata tells the controller to only cache metadata, and to watch the API server in metadata-only form.
+// If using this option, you must set the GroupVersionKind on the ObjectType you pass into the Register function.
+// If watching a resource with OnlyMetadata, for example the v1.Pod, you must not Get and List using the v1.Pod type.
+// Instead, you must use the special metav1.PartialObjectMetadata type.
+func WithOnlyMetadata() Option {
+	return func(cfg *config) {
+		cfg.onlyMetadata = true
+	}
+}
+
 func defaultConfig() config {
 	return config{
 		newReconciler: NewReconciler,
@@ -82,13 +94,26 @@ func Register(
 	}
 
 	for field, indexerFunc := range cfg.fieldIndices {
-		err := addIndex(ctx, mgr.GetFieldIndexer(), objectType, field, indexerFunc)
-		if err != nil {
+		if err := addIndex(
+			ctx,
+			mgr.GetFieldIndexer(),
+			objectType,
+			field,
+			indexerFunc,
+		); err != nil {
 			return err
 		}
 	}
 
-	builder := ctlr.NewControllerManagedBy(mgr).For(objectType)
+	var forOpts []ctlrBuilder.ForOption
+	if cfg.onlyMetadata {
+		if objectType.GetObjectKind().GroupVersionKind().Empty() {
+			panic("the object must have its GVK set")
+		}
+		forOpts = append(forOpts, ctlrBuilder.OnlyMetadata)
+	}
+
+	builder := ctlr.NewControllerManagedBy(mgr).For(objectType, forOpts...)
 
 	if cfg.k8sPredicate != nil {
 		builder = builder.WithEventFilter(cfg.k8sPredicate)
@@ -99,10 +124,10 @@ func Register(
 		ObjectType:           objectType,
 		EventCh:              eventCh,
 		NamespacedNameFilter: cfg.namespacedNameFilter,
+		OnlyMetadata:         cfg.onlyMetadata,
 	}
 
-	err := builder.Complete(cfg.newReconciler(recCfg))
-	if err != nil {
+	if err := builder.Complete(cfg.newReconciler(recCfg)); err != nil {
 		return fmt.Errorf("cannot build a controller for %T: %w", objectType, err)
 	}
 
@@ -119,8 +144,7 @@ func addIndex(
 	c, cancel := context.WithTimeout(ctx, addIndexFieldTimeout)
 	defer cancel()
 
-	err := indexer.IndexField(c, objectType, field, indexerFunc)
-	if err != nil {
+	if err := indexer.IndexField(c, objectType, field, indexerFunc); err != nil {
 		return fmt.Errorf("failed to add index for %T for field %s: %w", objectType, field, err)
 	}
 

@@ -1,0 +1,79 @@
+name: Update Docker Images
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # run every day at 02:00 UTC
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.ref_name }}-update-images
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  variables:
+    name: Get versions of base images
+    runs-on: ubuntu-22.04
+    outputs:
+      ngf_tag: ${{ steps.ngf.outputs.tag }}
+      nginx_version: ${{ steps.nginx.outputs.nginx_version }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          fetch-depth: 0
+
+      - name: Set NGF version
+        id: ngf
+        run: |
+          tag="$(git tag --sort=-version:refname | head -n1)"
+          echo "tag=${tag//v}" >> $GITHUB_OUTPUT
+
+      - name: Checkout Repository at ${{ steps.ngf.outputs.tag }}
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: refs/tags/v${{ steps.ngf.outputs.tag }}
+
+      - name: Set NGINX version
+        id: nginx
+        run: |
+          version=library/nginx:$(grep -m1 "FROM.*nginx:.*alpine" < build/Dockerfile.nginx | awk -F"[ :]" '{print $3}')
+          echo nginx_version=${version} >> $GITHUB_OUTPUT
+
+  check:
+    name: Check if updates are needed
+    runs-on: ubuntu-22.04
+    needs: variables
+    outputs:
+      needs-updating: ${{ steps.needs.outputs.needs-updating }}
+    steps:
+      - name: Check if update available for nginx image
+        id: update
+        uses: lucacome/docker-image-update-checker@f50d56412b948cfdbb842c5419372681e0db3df1 # v1.2.1
+        with:
+          base-image: ${{ needs.variables.outputs.nginx_version }}
+          image: ghcr.io/nginxinc/nginx-gateway-fabric/nginx:${{ needs.variables.outputs.ngf_tag }}
+          platforms: "linux/arm64, linux/amd64"
+
+      - id: needs
+        run: echo "needs-updating=${{ steps.update.outputs.needs-updating }}" >> $GITHUB_OUTPUT
+
+  build:
+    name: Build Image
+    needs: [variables, check]
+    if: ${{ needs.check.outputs.needs-updating }}
+    uses: ./.github/workflows/build.yml
+    with:
+      image: nginx
+      platforms: "linux/arm64, linux/amd64"
+      tag: ${{ needs.variables.outputs.ngf_tag }}
+    permissions:
+      contents: read # for docker/build-push-action to read repo content
+      security-events: write # for github/codeql-action/upload-sarif to upload SARIF results
+      packages: write # for docker/build-push-action to push to GHCR
+      id-token: write # for docker/login to login to NGINX registry

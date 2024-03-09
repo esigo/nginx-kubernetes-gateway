@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -13,7 +15,7 @@ import (
 
 const (
 	// nolint:lll
-	// Regex from: https://github.com/kubernetes-sigs/gateway-api/blob/v0.7.1/apis/v1beta1/shared_types.go#L495
+	// Regex from: https://github.com/kubernetes-sigs/gateway-api/blob/v1.0.0/apis/v1/shared_types.go#L640
 	controllerNameRegex = `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\/[A-Za-z0-9\/\-._~%!$&'()*+,;=:]+$` //nolint:lll
 )
 
@@ -89,12 +91,95 @@ func parseNamespacedResourceName(value string) (types.NamespacedName, error) {
 	}, nil
 }
 
+func validateQualifiedName(name string) error {
+	if len(name) == 0 {
+		return errors.New("must be set")
+	}
+
+	messages := validation.IsQualifiedName(name)
+	if len(messages) > 0 {
+		msg := strings.Join(messages, "; ")
+		return fmt.Errorf("invalid format: %s", msg)
+	}
+
+	return nil
+}
+
+func validateURL(value string) error {
+	if len(value) == 0 {
+		return errors.New("must be set")
+	}
+	val, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("%q must be a valid URL: %w", value, err)
+	}
+	if val.Scheme == "" {
+		return fmt.Errorf("%q must be a valid URL: bad scheme", value)
+	}
+	if val.Host == "" {
+		return fmt.Errorf("%q must be a valid URL: bad host", value)
+	}
+
+	return nil
+}
+
 func validateIP(ip string) error {
 	if ip == "" {
 		return errors.New("IP address must be set")
 	}
 	if net.ParseIP(ip) == nil {
 		return fmt.Errorf("%q must be a valid IP address", ip)
+	}
+
+	return nil
+}
+
+// validateEndpoint validates an endpoint, which is <host>:<port> where host is either a hostname or an IP address.
+func validateEndpoint(endpoint string) error {
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return fmt.Errorf("%q must be in the format <host>:<port>: %w", endpoint, err)
+	}
+
+	portVal, err := strconv.ParseInt(port, 10, 16)
+	if err != nil {
+		return fmt.Errorf("port must be a valid number: %w", err)
+	}
+
+	if portVal < 1 || portVal > 65535 {
+		return fmt.Errorf("port outside of valid port range [1 - 65535]: %v", port)
+	}
+
+	if err := validateIP(host); err == nil {
+		return nil
+	}
+
+	if errs := validation.IsDNS1123Subdomain(host); len(errs) == 0 {
+		return nil
+	}
+
+	// we don't know if the user intended to use a hostname or an IP address,
+	// so we return a generic error message
+	return fmt.Errorf("%q must be in the format <host>:<port>", endpoint)
+}
+
+// validatePort makes sure a given port is inside the valid port range for its usage
+func validatePort(port int) error {
+	if port < 1024 || port > 65535 {
+		return fmt.Errorf("port outside of valid port range [1024 - 65535]: %v", port)
+	}
+	return nil
+}
+
+// ensureNoPortCollisions checks if the same port has been defined multiple times
+func ensureNoPortCollisions(ports ...int) error {
+	seen := make(map[int]struct{})
+
+	for _, port := range ports {
+		if _, ok := seen[port]; ok {
+			return fmt.Errorf("port %d has been defined multiple times", port)
+		}
+		seen[port] = struct{}{}
 	}
 
 	return nil

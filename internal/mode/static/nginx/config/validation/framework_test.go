@@ -14,7 +14,7 @@ type supportedValuesValidatorFunc[T configValue] func(v T) (bool, []string)
 func runValidatorTests[T configValue](t *testing.T, run func(g *WithT, v T), caseNamePrefix string, values ...T) {
 	for i, v := range values {
 		t.Run(fmt.Sprintf("%s_case_#%d", caseNamePrefix, i), func(t *testing.T) {
-			g := NewGomegaWithT(t)
+			g := NewWithT(t)
 			run(g, v)
 		})
 	}
@@ -99,6 +99,34 @@ func TestValidateInSupportedValues(t *testing.T) {
 	)
 }
 
+func TestValidateNoUnsupportedValues(t *testing.T) {
+	unsupportedValues := map[string]struct{}{
+		"badvalue1": {},
+		"badvalue2": {},
+		"badvalue3": {},
+	}
+
+	validator := func(value string) (bool, []string) {
+		return validateNoUnsupportedValues(value, unsupportedValues)
+	}
+
+	testValidValuesForSupportedValuesValidator(
+		t,
+		validator,
+		"value1",
+		"value2",
+		"value3",
+	)
+	testInvalidValuesForSupportedValuesValidator(
+		t,
+		validator,
+		unsupportedValues,
+		"badvalue1",
+		"badvalue2",
+		"badvalue3",
+	)
+}
+
 func TestGetSortedKeysAsString(t *testing.T) {
 	values := map[string]struct{}{
 		"value3": {},
@@ -108,7 +136,7 @@ func TestGetSortedKeysAsString(t *testing.T) {
 
 	expected := []string{"value1", "value2", "value3"}
 
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	result := getSortedKeysAsString(values)
 	g.Expect(result).To(Equal(expected))

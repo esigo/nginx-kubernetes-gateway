@@ -1,7 +1,6 @@
 package graph
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -10,11 +9,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/gateway-api/apis/v1beta1"
+	v1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/framework/conditions"
-	staticConds "github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/state/conditions"
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/state/validation"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/framework/conditions"
+	staticConds "github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/state/conditions"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/state/validation"
 )
 
 const wildcardHostname = "~^"
@@ -24,7 +23,7 @@ type Rule struct {
 	// BackendRefs is a list of BackendRefs for the rule.
 	BackendRefs []BackendRef
 	// ValidMatches indicates whether the matches of the rule are valid.
-	// If the matches are invalid, NGK should not generate any configuration for the rule.
+	// If the matches are invalid, NGF should not generate any configuration for the rule.
 	ValidMatches bool
 	// ValidFilters indicates whether the filters of the rule are valid.
 	// If the filters are invalid, the data-plane should return 500 error provided that the matches are valid.
@@ -33,7 +32,7 @@ type Rule struct {
 
 // ParentRef describes a reference to a parent in an HTTPRoute.
 type ParentRef struct {
-	// Attachment is the attachment status of the ParentRef. It could be nil. In that case, NGK didn't attempt to
+	// Attachment is the attachment status of the ParentRef. It could be nil. In that case, NGF didn't attempt to
 	// attach because of problems with the Route.
 	Attachment *ParentRefAttachmentStatus
 	// Gateway is the NamespacedName of the referenced Gateway
@@ -57,8 +56,8 @@ type ParentRefAttachmentStatus struct {
 // Route represents an HTTPRoute.
 type Route struct {
 	// Source is the source resource of the Route.
-	Source *v1beta1.HTTPRoute
-	// ParentRefs includes ParentRefs with NKG Gateways only.
+	Source *v1.HTTPRoute
+	// ParentRefs includes ParentRefs with NGF Gateways only.
 	ParentRefs []ParentRef
 	// Conditions include Conditions for the HTTPRoute.
 	Conditions []conditions.Condition
@@ -66,14 +65,17 @@ type Route struct {
 	// If the Route is invalid, this field is nil
 	Rules []Rule
 	// Valid tells if the Route is valid.
-	// If it is invalid, NGK should not generate any configuration for it.
+	// If it is invalid, NGF should not generate any configuration for it.
 	Valid bool
+	// Attachable tells if the Route can be attached to any of the Gateways.
+	// Route can be invalid but still attachable.
+	Attachable bool
 }
 
 // buildRoutesForGateways builds routes from HTTPRoutes that reference any of the specified Gateways.
 func buildRoutesForGateways(
 	validator validation.HTTPFieldsValidator,
-	httpRoutes map[types.NamespacedName]*v1beta1.HTTPRoute,
+	httpRoutes map[types.NamespacedName]*v1.HTTPRoute,
 	gatewayNsNames []types.NamespacedName,
 ) map[types.NamespacedName]*Route {
 	if len(gatewayNsNames) == 0 {
@@ -93,10 +95,10 @@ func buildRoutesForGateways(
 }
 
 func buildSectionNameRefs(
-	parentRefs []v1beta1.ParentReference,
+	parentRefs []v1.ParentReference,
 	routeNamespace string,
 	gatewayNsNames []types.NamespacedName,
-) []ParentRef {
+) ([]ParentRef, error) {
 	sectionNameRefs := make([]ParentRef, 0, len(parentRefs))
 
 	type key struct {
@@ -122,9 +124,7 @@ func buildSectionNameRefs(
 		}
 
 		if _, exist := uniqueSectionsPerGateway[k]; exist {
-			panicForBrokenWebhookAssumption(
-				fmt.Errorf("duplicate section name %q for Gateway %s", sectionName, gw.String()),
-			)
+			return nil, fmt.Errorf("duplicate section name %q for Gateway %s", sectionName, gw.String())
 		}
 		uniqueSectionsPerGateway[k] = struct{}{}
 
@@ -134,18 +134,18 @@ func buildSectionNameRefs(
 		})
 	}
 
-	return sectionNameRefs
+	return sectionNameRefs, nil
 }
 
 func findGatewayForParentRef(
-	ref v1beta1.ParentReference,
+	ref v1.ParentReference,
 	routeNamespace string,
 	gatewayNsNames []types.NamespacedName,
 ) (gwNsName types.NamespacedName, found bool) {
 	if ref.Kind != nil && *ref.Kind != "Gateway" {
 		return types.NamespacedName{}, false
 	}
-	if ref.Group != nil && *ref.Group != v1beta1.GroupName {
+	if ref.Group != nil && *ref.Group != v1.GroupName {
 		return types.NamespacedName{}, false
 	}
 
@@ -166,22 +166,28 @@ func findGatewayForParentRef(
 
 func buildRoute(
 	validator validation.HTTPFieldsValidator,
-	ghr *v1beta1.HTTPRoute,
+	ghr *v1.HTTPRoute,
 	gatewayNsNames []types.NamespacedName,
 ) *Route {
-	sectionNameRefs := buildSectionNameRefs(ghr.Spec.ParentRefs, ghr.Namespace, gatewayNsNames)
+	r := &Route{
+		Source: ghr,
+	}
+	sectionNameRefs, err := buildSectionNameRefs(ghr.Spec.ParentRefs, ghr.Namespace, gatewayNsNames)
+	if err != nil {
+		r.Valid = false
+
+		return r
+	}
 	// route doesn't belong to any of the Gateways
 	if len(sectionNameRefs) == 0 {
 		return nil
 	}
+	r.ParentRefs = sectionNameRefs
 
-	r := &Route{
-		Source:     ghr,
-		ParentRefs: sectionNameRefs,
-	}
-
-	err := validateHostnames(ghr.Spec.Hostnames, field.NewPath("spec").Child("hostnames"))
-	if err != nil {
+	if err := validateHostnames(
+		ghr.Spec.Hostnames,
+		field.NewPath("spec").Child("hostnames"),
+	); err != nil {
 		r.Valid = false
 		r.Conditions = append(r.Conditions, staticConds.NewRouteUnsupportedValue(err.Error()))
 
@@ -189,6 +195,7 @@ func buildRoute(
 	}
 
 	r.Valid = true
+	r.Attachable = true
 
 	r.Rules = make([]Rule, len(ghr.Spec.Rules))
 
@@ -231,10 +238,7 @@ func buildRoute(
 		msg := allRulesErrs.ToAggregate().Error()
 
 		if atLeastOneValid {
-			// FIXME(pleshakov): Partial validity for HTTPRoute rules is not defined in the Gateway API spec yet.
-			// See https://github.com/nginxinc/nginx-kubernetes-gateway/issues/485
-			msg = "Some rules are invalid: " + msg
-			r.Conditions = append(r.Conditions, staticConds.NewTODO(msg))
+			r.Conditions = append(r.Conditions, staticConds.NewRoutePartiallyInvalid(msg))
 		} else {
 			msg = "All rules are invalid: " + msg
 			r.Conditions = append(r.Conditions, staticConds.NewRouteUnsupportedValue(msg))
@@ -261,7 +265,7 @@ func bindRoutesToListeners(
 }
 
 func bindRouteToListeners(r *Route, gw *Gateway, namespaces map[types.NamespacedName]*apiv1.Namespace) {
-	if !r.Valid {
+	if !r.Attachable {
 		return
 	}
 
@@ -276,7 +280,19 @@ func bindRouteToListeners(r *Route, gw *Gateway, namespaces map[types.Namespaced
 
 		path := field.NewPath("spec").Child("parentRefs").Index(ref.Idx)
 
-		// Case 1: Attachment is not possible due to unsupported configuration
+		attachableListeners, listenerExists := findAttachableListeners(
+			getSectionName(routeRef.SectionName),
+			gw.Listeners,
+		)
+
+		// Case 1: Attachment is not possible because the specified SectionName does not match any Listeners in the
+		// Gateway.
+		if !listenerExists {
+			attachment.FailedCondition = staticConds.NewRouteNoMatchingParent()
+			continue
+		}
+
+		// Case 2: Attachment is not possible due to unsupported configuration
 
 		if routeRef.Port != nil {
 			valErr := field.Forbidden(path.Child("port"), "cannot be set")
@@ -284,7 +300,7 @@ func bindRouteToListeners(r *Route, gw *Gateway, namespaces map[types.Namespaced
 			continue
 		}
 
-		// Case 2: the parentRef references an ignored Gateway resource.
+		// Case 3: the parentRef references an ignored Gateway resource.
 
 		referencesWinningGw := ref.Gateway.Namespace == gw.Source.Namespace && ref.Gateway.Name == gw.Source.Name
 
@@ -293,20 +309,24 @@ func bindRouteToListeners(r *Route, gw *Gateway, namespaces map[types.Namespaced
 			continue
 		}
 
-		// Case 3: Attachment is not possible because Gateway is invalid
+		// Case 4: Attachment is not possible because Gateway is invalid
 
 		if !gw.Valid {
 			attachment.FailedCondition = staticConds.NewRouteInvalidGateway()
 			continue
 		}
 
-		// Case 4 - winning Gateway
+		// Case 5 - winning Gateway
 
 		// Try to attach Route to all matching listeners
-		cond, attached := tryToAttachRouteToListeners(ref.Attachment, routeRef.SectionName, r, gw, namespaces)
+
+		cond, attached := tryToAttachRouteToListeners(ref.Attachment, attachableListeners, r, gw, namespaces)
 		if !attached {
 			attachment.FailedCondition = cond
 			continue
+		}
+		if cond != (conditions.Condition{}) {
+			r.Conditions = append(r.Conditions, cond)
 		}
 
 		attachment.Attached = true
@@ -314,22 +334,18 @@ func bindRouteToListeners(r *Route, gw *Gateway, namespaces map[types.Namespaced
 }
 
 // tryToAttachRouteToListeners tries to attach the route to the listeners that match the parentRef and the hostnames.
-// If it succeeds in attaching at least one listener it will return true and the condition will be empty.
-// If it fails to attach the route, it will return false and the failure condition.
+// There are two cases:
+// (1) If it succeeds in attaching at least one listener it will return true. The returned condition will be empty if
+// at least one of the listeners is valid. Otherwise, it will return the failure condition.
+// (2) If it fails to attach the route, it will return false and the failure condition.
 func tryToAttachRouteToListeners(
 	refStatus *ParentRefAttachmentStatus,
-	sectionName *v1beta1.SectionName,
+	attachableListeners []*Listener,
 	route *Route,
 	gw *Gateway,
 	namespaces map[types.NamespacedName]*apiv1.Namespace,
 ) (conditions.Condition, bool) {
-	validListeners, listenerExists := findValidListeners(getSectionName(sectionName), gw.Listeners)
-
-	if !listenerExists {
-		return staticConds.NewRouteNoMatchingParent(), false
-	}
-
-	if len(validListeners) == 0 {
+	if len(attachableListeners) == 0 {
 		return staticConds.NewRouteInvalidListener(), false
 	}
 
@@ -349,11 +365,14 @@ func tryToAttachRouteToListeners(
 		return true, true
 	}
 
+	var attachedToAtLeastOneValidListener bool
+
 	var allowed, attached bool
-	for _, l := range validListeners {
+	for _, l := range attachableListeners {
 		routeAllowed, routeAttached := bind(l)
 		allowed = allowed || routeAllowed
 		attached = attached || routeAttached
+		attachedToAtLeastOneValidListener = attachedToAtLeastOneValidListener || (routeAttached && l.Valid)
 	}
 
 	if !attached {
@@ -363,37 +382,41 @@ func tryToAttachRouteToListeners(
 		return staticConds.NewRouteNoMatchingListenerHostname(), false
 	}
 
+	if !attachedToAtLeastOneValidListener {
+		return staticConds.NewRouteInvalidListener(), true
+	}
+
 	return conditions.Condition{}, true
 }
 
-// findValidListeners returns a list of valid listeners and whether the listener exists for a non-empty sectionName.
-func findValidListeners(sectionName string, listeners map[string]*Listener) ([]*Listener, bool) {
+// findAttachableListeners returns a list of attachable listeners and whether the listener exists for a non-empty
+// sectionName.
+func findAttachableListeners(sectionName string, listeners []*Listener) ([]*Listener, bool) {
 	if sectionName != "" {
-		l, exists := listeners[sectionName]
-		if !exists {
-			return nil, false
+		for _, l := range listeners {
+			if l.Name == sectionName {
+				if l.Attachable {
+					return []*Listener{l}, true
+				}
+				return nil, true
+			}
 		}
-
-		if l.Valid {
-			return []*Listener{l}, true
-		}
-
-		return nil, true
+		return nil, false
 	}
 
-	validListeners := make([]*Listener, 0, len(listeners))
+	attachableListeners := make([]*Listener, 0, len(listeners))
 	for _, l := range listeners {
-		if !l.Valid {
+		if !l.Attachable {
 			continue
 		}
 
-		validListeners = append(validListeners, l)
+		attachableListeners = append(attachableListeners, l)
 	}
 
-	return validListeners, true
+	return attachableListeners, true
 }
 
-func findAcceptedHostnames(listenerHostname *v1beta1.Hostname, routeHostnames []v1beta1.Hostname) []string {
+func findAcceptedHostnames(listenerHostname *v1.Hostname, routeHostnames []v1.Hostname) []string {
 	hostname := getHostname(listenerHostname)
 
 	if len(routeHostnames) == 0 {
@@ -484,11 +507,11 @@ func routeAllowedByListener(
 ) bool {
 	if listener.Source.AllowedRoutes != nil {
 		switch *listener.Source.AllowedRoutes.Namespaces.From {
-		case v1beta1.NamespacesFromAll:
+		case v1.NamespacesFromAll:
 			return true
-		case v1beta1.NamespacesFromSame:
+		case v1.NamespacesFromSame:
 			return routeNS == gwNS
-		case v1beta1.NamespacesFromSelector:
+		case v1.NamespacesFromSelector:
 			if listener.AllowedRouteLabelSelector == nil {
 				return false
 			}
@@ -503,21 +526,21 @@ func routeAllowedByListener(
 	return true
 }
 
-func getHostname(h *v1beta1.Hostname) string {
+func getHostname(h *v1.Hostname) string {
 	if h == nil {
 		return ""
 	}
 	return string(*h)
 }
 
-func getSectionName(s *v1beta1.SectionName) string {
+func getSectionName(s *v1.SectionName) string {
 	if s == nil {
 		return ""
 	}
 	return string(*s)
 }
 
-func validateHostnames(hostnames []v1beta1.Hostname, path *field.Path) error {
+func validateHostnames(hostnames []v1.Hostname, path *field.Path) error {
 	var allErrs field.ErrorList
 
 	for i := range hostnames {
@@ -532,7 +555,7 @@ func validateHostnames(hostnames []v1beta1.Hostname, path *field.Path) error {
 
 func validateMatch(
 	validator validation.HTTPFieldsValidator,
-	match v1beta1.HTTPRouteMatch,
+	match v1.HTTPRouteMatch,
 	matchPath *field.Path,
 ) field.ErrorList {
 	var allErrs field.ErrorList
@@ -550,7 +573,11 @@ func validateMatch(
 		allErrs = append(allErrs, validateQueryParamMatch(validator, q, queryParamPath)...)
 	}
 
-	if err := validateMethodMatch(validator, match.Method, matchPath.Child("method")); err != nil {
+	if err := validateMethodMatch(
+		validator,
+		match.Method,
+		matchPath.Child("method"),
+	); err != nil {
 		allErrs = append(allErrs, err)
 	}
 
@@ -559,7 +586,7 @@ func validateMatch(
 
 func validateMethodMatch(
 	validator validation.HTTPFieldsValidator,
-	method *v1beta1.HTTPMethod,
+	method *v1.HTTPMethod,
 	methodPath *field.Path,
 ) *field.Error {
 	if method == nil {
@@ -575,15 +602,15 @@ func validateMethodMatch(
 
 func validateQueryParamMatch(
 	validator validation.HTTPFieldsValidator,
-	q v1beta1.HTTPQueryParamMatch,
+	q v1.HTTPQueryParamMatch,
 	queryParamPath *field.Path,
 ) field.ErrorList {
 	var allErrs field.ErrorList
 
 	if q.Type == nil {
 		allErrs = append(allErrs, field.Required(queryParamPath.Child("type"), "cannot be empty"))
-	} else if *q.Type != v1beta1.QueryParamMatchExact {
-		valErr := field.NotSupported(queryParamPath.Child("type"), *q.Type, []string{string(v1beta1.QueryParamMatchExact)})
+	} else if *q.Type != v1.QueryParamMatchExact {
+		valErr := field.NotSupported(queryParamPath.Child("type"), *q.Type, []string{string(v1.QueryParamMatchExact)})
 		allErrs = append(allErrs, valErr)
 	}
 
@@ -602,18 +629,18 @@ func validateQueryParamMatch(
 
 func validateHeaderMatch(
 	validator validation.HTTPFieldsValidator,
-	header v1beta1.HTTPHeaderMatch,
+	header v1.HTTPHeaderMatch,
 	headerPath *field.Path,
 ) field.ErrorList {
 	var allErrs field.ErrorList
 
 	if header.Type == nil {
 		allErrs = append(allErrs, field.Required(headerPath.Child("type"), "cannot be empty"))
-	} else if *header.Type != v1beta1.HeaderMatchExact {
+	} else if *header.Type != v1.HeaderMatchExact {
 		valErr := field.NotSupported(
 			headerPath.Child("type"),
 			*header.Type,
-			[]string{string(v1beta1.HeaderMatchExact)},
+			[]string{string(v1.HeaderMatchExact)},
 		)
 		allErrs = append(allErrs, valErr)
 	}
@@ -633,7 +660,7 @@ func validateHeaderMatch(
 
 func validatePathMatch(
 	validator validation.HTTPFieldsValidator,
-	path *v1beta1.HTTPPathMatch,
+	path *v1.HTTPPathMatch,
 	fieldPath *field.Path,
 ) field.ErrorList {
 	var allErrs field.ErrorList
@@ -643,15 +670,15 @@ func validatePathMatch(
 	}
 
 	if path.Type == nil {
-		panicForBrokenWebhookAssumption(errors.New("path type cannot be nil"))
+		return field.ErrorList{field.Required(fieldPath.Child("type"), "path type cannot be nil")}
 	}
 	if path.Value == nil {
-		panicForBrokenWebhookAssumption(errors.New("path value cannot be nil"))
+		return field.ErrorList{field.Required(fieldPath.Child("value"), "path value cannot be nil")}
 	}
 
-	if *path.Type != v1beta1.PathMatchPathPrefix && *path.Type != v1beta1.PathMatchExact {
+	if *path.Type != v1.PathMatchPathPrefix && *path.Type != v1.PathMatchExact {
 		valErr := field.NotSupported(fieldPath.Child("type"), *path.Type,
-			[]string{string(v1beta1.PathMatchExact), string(v1beta1.PathMatchPathPrefix)})
+			[]string{string(v1.PathMatchExact), string(v1.PathMatchPathPrefix)})
 		allErrs = append(allErrs, valErr)
 	}
 
@@ -665,23 +692,26 @@ func validatePathMatch(
 
 func validateFilter(
 	validator validation.HTTPFieldsValidator,
-	filter v1beta1.HTTPRouteFilter,
+	filter v1.HTTPRouteFilter,
 	filterPath *field.Path,
 ) field.ErrorList {
 	var allErrs field.ErrorList
 
 	switch filter.Type {
-	case v1beta1.HTTPRouteFilterRequestRedirect:
+	case v1.HTTPRouteFilterRequestRedirect:
 		return validateFilterRedirect(validator, filter, filterPath)
-	case v1beta1.HTTPRouteFilterRequestHeaderModifier:
+	case v1.HTTPRouteFilterURLRewrite:
+		return validateFilterRewrite(validator, filter, filterPath)
+	case v1.HTTPRouteFilterRequestHeaderModifier:
 		return validateFilterHeaderModifier(validator, filter, filterPath)
 	default:
 		valErr := field.NotSupported(
 			filterPath.Child("type"),
 			filter.Type,
 			[]string{
-				string(v1beta1.HTTPRouteFilterRequestRedirect),
-				string(v1beta1.HTTPRouteFilterRequestHeaderModifier),
+				string(v1.HTTPRouteFilterRequestRedirect),
+				string(v1.HTTPRouteFilterURLRewrite),
+				string(v1.HTTPRouteFilterRequestHeaderModifier),
 			},
 		)
 		allErrs = append(allErrs, valErr)
@@ -691,18 +721,17 @@ func validateFilter(
 
 func validateFilterRedirect(
 	validator validation.HTTPFieldsValidator,
-	filter v1beta1.HTTPRouteFilter,
+	filter v1.HTTPRouteFilter,
 	filterPath *field.Path,
 ) field.ErrorList {
 	var allErrs field.ErrorList
 
-	if filter.RequestRedirect == nil {
-		panicForBrokenWebhookAssumption(errors.New("requestRedirect cannot be nil"))
-	}
-
 	redirect := filter.RequestRedirect
-
 	redirectPath := filterPath.Child("requestRedirect")
+
+	if redirect == nil {
+		return field.ErrorList{field.Required(redirectPath, "requestRedirect cannot be nil")}
+	}
 
 	if redirect.Scheme != nil {
 		if valid, supportedValues := validator.ValidateRedirectScheme(*redirect.Scheme); !valid {
@@ -712,7 +741,7 @@ func validateFilterRedirect(
 	}
 
 	if redirect.Hostname != nil {
-		if err := validator.ValidateRedirectHostname(string(*redirect.Hostname)); err != nil {
+		if err := validator.ValidateHostname(string(*redirect.Hostname)); err != nil {
 			valErr := field.Invalid(redirectPath.Child("hostname"), *redirect.Hostname, err.Error())
 			allErrs = append(allErrs, valErr)
 		}
@@ -740,9 +769,52 @@ func validateFilterRedirect(
 	return allErrs
 }
 
+func validateFilterRewrite(
+	validator validation.HTTPFieldsValidator,
+	filter v1.HTTPRouteFilter,
+	filterPath *field.Path,
+) field.ErrorList {
+	var allErrs field.ErrorList
+
+	rewrite := filter.URLRewrite
+	rewritePath := filterPath.Child("urlRewrite")
+
+	if rewrite == nil {
+		return field.ErrorList{field.Required(rewritePath, "urlRewrite cannot be nil")}
+	}
+
+	if rewrite.Hostname != nil {
+		if err := validator.ValidateHostname(string(*rewrite.Hostname)); err != nil {
+			valErr := field.Invalid(rewritePath.Child("hostname"), *rewrite.Hostname, err.Error())
+			allErrs = append(allErrs, valErr)
+		}
+	}
+
+	if rewrite.Path != nil {
+		var path string
+		switch rewrite.Path.Type {
+		case v1.FullPathHTTPPathModifier:
+			path = *rewrite.Path.ReplaceFullPath
+		case v1.PrefixMatchHTTPPathModifier:
+			path = *rewrite.Path.ReplacePrefixMatch
+		default:
+			msg := fmt.Sprintf("urlRewrite path type %s not supported", rewrite.Path.Type)
+			valErr := field.Invalid(rewritePath.Child("path"), *rewrite.Path, msg)
+			return append(allErrs, valErr)
+		}
+
+		if err := validator.ValidateRewritePath(path); err != nil {
+			valErr := field.Invalid(rewritePath.Child("path"), *rewrite.Path, err.Error())
+			allErrs = append(allErrs, valErr)
+		}
+	}
+
+	return allErrs
+}
+
 func validateFilterHeaderModifier(
 	validator validation.HTTPFieldsValidator,
-	filter v1beta1.HTTPRouteFilter,
+	filter v1.HTTPRouteFilter,
 	filterPath *field.Path,
 ) field.ErrorList {
 	headerModifier := filter.RequestHeaderModifier
@@ -750,7 +822,7 @@ func validateFilterHeaderModifier(
 	headerModifierPath := filterPath.Child("requestHeaderModifier")
 
 	if headerModifier == nil {
-		panicForBrokenWebhookAssumption(errors.New("requestHeaderModifier cannot be nil"))
+		return field.ErrorList{field.Required(headerModifierPath, "requestHeaderModifier cannot be nil")}
 	}
 
 	return validateFilterHeaderModifierFields(validator, headerModifier, headerModifierPath)
@@ -758,10 +830,24 @@ func validateFilterHeaderModifier(
 
 func validateFilterHeaderModifierFields(
 	validator validation.HTTPFieldsValidator,
-	headerModifier *v1beta1.HTTPHeaderFilter,
+	headerModifier *v1.HTTPHeaderFilter,
 	headerModifierPath *field.Path,
 ) field.ErrorList {
 	var allErrs field.ErrorList
+
+	// Ensure that the header names are case-insensitive unique
+	allErrs = append(allErrs, validateRequestHeadersCaseInsensitiveUnique(
+		headerModifier.Add,
+		headerModifierPath.Child("add"))...,
+	)
+	allErrs = append(allErrs, validateRequestHeadersCaseInsensitiveUnique(
+		headerModifier.Set,
+		headerModifierPath.Child("set"))...,
+	)
+	allErrs = append(allErrs, validateRequestHeaderStringCaseInsensitiveUnique(
+		headerModifier.Remove,
+		headerModifierPath.Child("remove"))...,
+	)
 
 	for _, h := range headerModifier.Add {
 		if err := validator.ValidateRequestHeaderName(string(h.Name)); err != nil {
@@ -788,6 +874,43 @@ func validateFilterHeaderModifierFields(
 			valErr := field.Invalid(headerModifierPath.Child("remove"), h, err.Error())
 			allErrs = append(allErrs, valErr)
 		}
+	}
+
+	return allErrs
+}
+
+func validateRequestHeadersCaseInsensitiveUnique(
+	headers []v1.HTTPHeader,
+	path *field.Path,
+) field.ErrorList {
+	var allErrs field.ErrorList
+
+	seen := make(map[string]struct{})
+
+	for _, h := range headers {
+		name := strings.ToLower(string(h.Name))
+		if _, exists := seen[name]; exists {
+			valErr := field.Invalid(path, h, "header name is not unique")
+			allErrs = append(allErrs, valErr)
+		}
+		seen[name] = struct{}{}
+	}
+
+	return allErrs
+}
+
+func validateRequestHeaderStringCaseInsensitiveUnique(headers []string, path *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+
+	seen := make(map[string]struct{})
+
+	for _, h := range headers {
+		name := strings.ToLower(h)
+		if _, exists := seen[name]; exists {
+			valErr := field.Invalid(path, h, "header name is not unique")
+			allErrs = append(allErrs, valErr)
+		}
+		seen[name] = struct{}{}
 	}
 
 	return allErrs

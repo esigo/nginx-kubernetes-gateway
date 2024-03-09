@@ -1,16 +1,21 @@
-NKG_TAG = edge
-NKG_PREFIX = nginx-kubernetes-gateway
-GW_API_VERSION ?= 0.7.1
+TAG = edge
+VERSION = 1.1.0 # NGF version
+PREFIX = nginx-gateway-fabric
+NGINX_PREFIX = $(PREFIX)/nginx
+NGINX_PLUS_PREFIX ?= $(PREFIX)/nginx-plus
+GW_API_VERSION ?= 1.0.0
 GATEWAY_CLASS = nginx
-SUPPORTED_FEATURES = HTTPRoute,HTTPRouteQueryParamMatching,HTTPRouteMethodMatching,HTTPRoutePortRedirect,HTTPRouteSchemeRedirect,GatewayClassObservedGenerationBump
+SUPPORTED_FEATURES = HTTPRouteQueryParamMatching,HTTPRouteMethodMatching,HTTPRoutePortRedirect,HTTPRouteSchemeRedirect,HTTPRouteHostRewrite,HTTPRoutePathRewrite,GatewayPort8080
+KIND_IMAGE ?= $(shell grep -m1 'FROM kindest/node' <tests/Dockerfile | awk -F'[ ]' '{print $$2}')
 KIND_KUBE_CONFIG=$${HOME}/.kube/kind/config
-TAG = latest
-PREFIX = conformance-test-runner
-NKG_MANIFEST=../deploy/manifests/nginx-gateway.yaml
-SERVICE_MANIFEST=../deploy/manifests/service/nodeport.yaml
+CONFORMANCE_TAG = latest
+CONFORMANCE_PREFIX = conformance-test-runner
+NGF_MANIFEST=../deploy/manifests/nginx-gateway.yaml
+CRDS=../deploy/manifests/crds/
 STATIC_MANIFEST=provisioner/static-deployment.yaml
 PROVISIONER_MANIFEST=provisioner/provisioner.yaml
-NGINX_IMAGE=$(shell yq '.spec.template.spec.containers[1].image as $$nginx_ver | $$nginx_ver' $(STATIC_MANIFEST))
+INSTALL_WEBHOOK ?= false
+ENABLE_EXPERIMENTAL ?= false
 .DEFAULT_GOAL := help
 
 .PHONY: help
@@ -24,75 +29,97 @@ update-go-modules: ## Update the gateway-api go modules to latest main version
 
 .PHONY: build-test-runner-image
 build-test-runner-image: ## Build conformance test runner image
-	docker build -t $(PREFIX):$(TAG) -f tests/Dockerfile ..
+	docker build -t $(CONFORMANCE_PREFIX):$(CONFORMANCE_TAG) -f tests/Dockerfile ..
 
 .PHONY: create-kind-cluster
 create-kind-cluster: ## Create a kind cluster
-	$(eval KIND_IMAGE=$(shell grep -m1 'FROM kindest/node' <tests/Dockerfile | awk -F'[ ]' '{print $$2}'))
 	kind create cluster --image $(KIND_IMAGE)
 	kind export kubeconfig --kubeconfig $(KIND_KUBE_CONFIG)
 
-.PHONY: preload-nginx-container
-preload-nginx-container: ## Preload NGINX container on configured kind cluster
-	docker pull $(NGINX_IMAGE)
-	kind load docker-image $(NGINX_IMAGE)
+.PHONY: update-ngf-manifest
+update-ngf-manifest: ## Update the NGF deployment manifest image names and imagePullPolicies
+	cd .. && make generate-manifests HELM_TEMPLATE_EXTRA_ARGS_FOR_ALL_MANIFESTS_FILE="--set nginxGateway.kind=skip" HELM_TEMPLATE_COMMON_ARGS="--set nginxGateway.image.repository=$(PREFIX) --set nginxGateway.image.tag=$(TAG) --set nginxGateway.image.pullPolicy=Never --set nginx.image.repository=$(NGINX_PREFIX) --set nginx.image.tag=$(TAG) --set nginx.image.pullPolicy=Never --set nginxGateway.gwAPIExperimentalFeatures.enable=$(ENABLE_EXPERIMENTAL)" && cd -
 
-.PHONY: update-nkg-manifest
-update-nkg-manifest: ## Update the NKG deployment manifest image name and imagePullPolicy
-	cd .. && make generate-manifests HELM_TEMPLATE_EXTRA_ARGS_FOR_ALL_MANIFESTS_FILE="--set nginxGateway.kind=skip" HELM_TEMPLATE_COMMON_ARGS="--set nginxGateway.image.repository=$(NKG_PREFIX) --set nginxGateway.image.tag=$(NKG_TAG) --set nginxGateway.image.pullPolicy=Never" && cd -
+.PHONY: update-ngf-manifest-with-plus
+update-ngf-manifest-with-plus: ## Update the NGF deployment manifest image names and imagePullPolicies including nginx-plus
+	cd .. && make generate-manifests HELM_TEMPLATE_EXTRA_ARGS_FOR_ALL_MANIFESTS_FILE="--set nginxGateway.kind=skip" HELM_TEMPLATE_COMMON_ARGS="--set nginxGateway.image.repository=$(PREFIX) --set nginxGateway.image.tag=$(TAG) --set nginxGateway.image.pullPolicy=Never --set nginx.image.repository=$(NGINX_PLUS_PREFIX) --set nginx.image.tag=$(TAG) --set nginx.image.pullPolicy=Never --set nginx.plus=true" && cd -
 
-.PHONY: build-nkg-image
-build-nkg-image: ## Build NKG container and load it and NGINX container on configured kind cluster
-	cd .. && make PREFIX=$(NKG_PREFIX) TAG=$(NKG_TAG) container
+.PHONY: build-images
+build-images: ## Build NGF and NGINX images
+	cd .. && make PREFIX=$(PREFIX) TAG=$(TAG) build-images
 
 .PHONY: load-images
-load-images: preload-nginx-container ## Load NKG and NGINX containers on configured kind cluster
-	kind load docker-image $(NKG_PREFIX):$(NKG_TAG)
+load-images: ## Load NGF and NGINX images on configured kind cluster
+	cd .. && make PREFIX=$(PREFIX) TAG=$(TAG) load-images
 
-.PHONY: prepare-nkg-dependencies
-prepare-nkg-dependencies: update-nkg-manifest ## Install NKG dependencies on configured kind cluster
-	./scripts/install-gateway.sh $(GW_API_VERSION)
-	kubectl wait --for=condition=available --timeout=60s deployment gateway-api-admission-server -n gateway-system
-	kubectl apply -f $(NKG_MANIFEST)
-	kubectl apply -f $(SERVICE_MANIFEST)
+.PHONY: build-images-with-plus
+build-images-with-plus: ## Build NGF and NGINX Plus images
+	cd .. && make PREFIX=$(PREFIX) TAG=$(TAG) build-images-with-plus
+
+.PHONY: load-images-with-plus
+load-images-with-plus: ## Load NGF and NGINX Plus images on configured kind cluster
+	cd .. && make PREFIX=$(PREFIX) TAG=$(TAG) load-images-with-plus
+
+.PHONY: prepare-ngf-dependencies
+prepare-ngf-dependencies: update-ngf-manifest ## Install NGF dependencies on configured kind cluster
+	./scripts/install-gateway.sh $(GW_API_VERSION) $(INSTALL_WEBHOOK) $(ENABLE_EXPERIMENTAL)
+	kubectl apply -f $(CRDS)
+	kubectl apply -f $(NGF_MANIFEST)
+
+.PHONY: prepare-ngf-dependencies-with-plus
+prepare-ngf-dependencies-with-plus: update-ngf-manifest-with-plus ## Install NGF dependencies with Plus on configured kind cluster
+	./scripts/install-gateway.sh $(GW_API_VERSION) $(INSTALL_WEBHOOK)
+	kubectl apply -f $(CRDS)
+	kubectl apply -f $(NGF_MANIFEST)
 
 .PHONY: deploy-updated-provisioner
 deploy-updated-provisioner: ## Update provisioner manifest and deploy to the configured kind cluster
 	yq '(select(di != 3))' $(PROVISIONER_MANIFEST) | kubectl apply -f -
-	yq '(select(.spec.template.spec.containers[].image) | .spec.template.spec.containers[].image="$(NKG_PREFIX):$(NKG_TAG)" | .spec.template.spec.containers[].imagePullPolicy = "Never")' $(PROVISIONER_MANIFEST) | kubectl apply -f -
+	yq '(select(.spec.template.spec.containers[].image) | .spec.template.spec.containers[].image="$(PREFIX):$(TAG)" | .spec.template.spec.containers[].imagePullPolicy = "Never")' $(PROVISIONER_MANIFEST) | kubectl apply -f -
 
-.PHONY: install-nkg-local-build
-install-nkg-local-build: prepare-nkg-dependencies build-nkg-image load-images deploy-updated-provisioner ## Install NKG from local build with provisioner on configured kind cluster
+.PHONY: install-ngf-local-build
+install-ngf-local-build: prepare-ngf-dependencies build-images load-images deploy-updated-provisioner ## Install NGF from local build with provisioner on configured kind cluster
 
-.PHONY: install-nkg-local-no-build
-install-nkg-local-no-build: prepare-nkg-dependencies load-images deploy-updated-provisioner ## Install NKG from local build with provisioner on configured kind cluster but do not build the NKG image
+.PHONY: install-ngf-local-no-build
+install-ngf-local-no-build: prepare-ngf-dependencies load-images deploy-updated-provisioner ## Install NGF from local build with provisioner on configured kind cluster but do not build the NGF image
 
-.PHONY: install-nkg-edge
-install-nkg-edge: preload-nginx-container prepare-nkg-dependencies ## Install NKG with provisioner from edge on configured kind cluster
+.PHONY: install-ngf-local-build-with-plus
+install-ngf-local-build-with-plus: prepare-ngf-dependencies-with-plus build-images-with-plus load-images-with-plus deploy-updated-provisioner ## Install NGF with Plus from local build with provisioner on configured kind cluster
+
+.PHONY: install-ngf-local-no-build-with-plus
+install-ngf-local-no-build-with-plus: prepare-ngf-dependencies-with-plus load-images-with-plus deploy-updated-provisioner ## Install NGF with Plus from local build with provisioner on configured kind cluster but do not build the NGF image
+
+.PHONY: install-ngf-edge
+install-ngf-edge: prepare-ngf-dependencies ## Install NGF with provisioner from edge on configured kind cluster
 	kubectl apply -f $(PROVISIONER_MANIFEST)
 
 .PHONY: run-conformance-tests
 run-conformance-tests: ## Run conformance tests
-	kind load docker-image $(PREFIX):$(TAG)
+	kind load docker-image $(CONFORMANCE_PREFIX):$(CONFORMANCE_TAG)
 	kubectl apply -f tests/conformance-rbac.yaml
 	kubectl run -i conformance \
-		--image=$(PREFIX):$(TAG) --image-pull-policy=Never \
+		--image=$(CONFORMANCE_PREFIX):$(CONFORMANCE_TAG) --image-pull-policy=Never \
 		--overrides='{ "spec": { "serviceAccountName": "conformance" }  }' \
-		--restart=Never -- go test -v . -tags conformance -args --gateway-class=$(GATEWAY_CLASS) --debug \
-						        --supported-features=$(SUPPORTED_FEATURES)
+		--restart=Never -- sh -c "go test -v . -tags conformance,experimental -args --gateway-class=$(GATEWAY_CLASS) \
+						        --supported-features=$(SUPPORTED_FEATURES) --version=$(VERSION) \
+								--report-output=output.txt; cat output.txt" | tee output.txt
+	sed -e '1,/CONFORMANCE PROFILE/d' output.txt > conformance-profile.yaml
+	rm output.txt
+	[ $(shell cat conformance-profile.yaml | yq '.profiles[0].core.result') != "failure" ] \
+		&& [ $(shell cat conformance-profile.yaml | yq '.profiles[0].extended.result') != "failure" ] || exit 2
 
 .PHONY: cleanup-conformance-tests
 cleanup-conformance-tests: ## Clean up conformance tests fixtures
 	kubectl delete pod conformance
 	kubectl delete -f tests/conformance-rbac.yaml
 
-.PHONY: uninstall-nkg
-uninstall-nkg: uninstall-k8s-components undo-manifests-update ## Uninstall NKG on configured kind cluster and undo manifest changes
+.PHONY: uninstall-ngf
+uninstall-ngf: uninstall-k8s-components undo-manifests-update ## Uninstall NGF on configured kind cluster and undo manifest changes
 
 .PHONY: uninstall-k8s-components
 uninstall-k8s-components: ## Uninstall installed components on configured kind cluster
-	kubectl delete -f $(NKG_MANIFEST)
-	./scripts/uninstall-gateway.sh $(GW_API_VERSION)
+	-kubectl delete -f $(NGF_MANIFEST)
+	./scripts/uninstall-gateway.sh $(GW_API_VERSION) $(INSTALL_WEBHOOK) $(ENABLE_EXPERIMENTAL)
 	kubectl delete clusterrole nginx-gateway-provisioner
 	kubectl delete clusterrolebinding nginx-gateway-provisioner
 

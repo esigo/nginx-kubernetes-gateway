@@ -2,7 +2,7 @@ package validation
 
 // Validators include validators for Gateway API resources from the perspective of a data-plane.
 // It is used for fields that propagate into the data plane configuration. For example, the path in a routing rule.
-// However, not all such fields are validated: NKG will not validate a field using Validators if it is confident that
+// However, not all such fields are validated: NGF will not validate a field using Validators if it is confident that
 // the field is valid.
 type Validators struct {
 	HTTPFieldsValidator HTTPFieldsValidator
@@ -20,9 +20,10 @@ type HTTPFieldsValidator interface {
 	ValidateQueryParamValueInMatch(name string) error
 	ValidateMethodInMatch(method string) (valid bool, supportedValues []string)
 	ValidateRedirectScheme(scheme string) (valid bool, supportedValues []string)
-	ValidateRedirectHostname(hostname string) error
 	ValidateRedirectPort(port int32) error
 	ValidateRedirectStatusCode(statusCode int) (valid bool, supportedValues []string)
+	ValidateHostname(hostname string) error
+	ValidateRewritePath(path string) error
 	ValidateRequestHeaderName(name string) error
 	ValidateRequestHeaderValue(value string) error
 }

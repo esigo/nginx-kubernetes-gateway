@@ -9,8 +9,8 @@ import (
 	. "github.com/onsi/gomega"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/nginx/file"
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/nginx/file/filefakes"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/nginx/file"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/nginx/file/filefakes"
 )
 
 var _ = Describe("EventHandler", func() {
@@ -23,7 +23,7 @@ var _ = Describe("EventHandler", func() {
 
 		ensureFiles := func(files []file.File) {
 			entries, err := os.ReadDir(tmpDir)
-			Expect(err).ShouldNot(HaveOccurred())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(entries).Should(HaveLen(len(files)))
 
 			entriesMap := make(map[string]os.DirEntry)
@@ -36,18 +36,18 @@ var _ = Describe("EventHandler", func() {
 				Expect(ok).Should(BeTrue())
 
 				info, err := os.Stat(f.Path)
-				Expect(err).ShouldNot(HaveOccurred())
+				Expect(err).ToNot(HaveOccurred())
 
 				Expect(info.IsDir()).To(BeFalse())
 
 				if f.Type == file.TypeRegular {
 					Expect(info.Mode()).To(Equal(os.FileMode(0o644)))
 				} else {
-					Expect(info.Mode()).To(Equal(os.FileMode(0o600)))
+					Expect(info.Mode()).To(Equal(os.FileMode(0o640)))
 				}
 
 				bytes, err := os.ReadFile(f.Path)
-				Expect(err).ShouldNot(HaveOccurred())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(bytes).To(Equal(f.Content))
 			}
 		}
@@ -89,7 +89,7 @@ var _ = Describe("EventHandler", func() {
 			files := []file.File{regular1, regular2, secret}
 
 			err := mgr.ReplaceFiles(files)
-			Expect(err).ShouldNot(HaveOccurred())
+			Expect(err).ToNot(HaveOccurred())
 
 			ensureFiles(files)
 		})
@@ -102,7 +102,7 @@ var _ = Describe("EventHandler", func() {
 			}
 
 			err := mgr.ReplaceFiles(files)
-			Expect(err).ShouldNot(HaveOccurred())
+			Expect(err).ToNot(HaveOccurred())
 
 			ensureFiles(files)
 			ensureNotExist(regular1)
@@ -110,9 +110,29 @@ var _ = Describe("EventHandler", func() {
 
 		It("should remove all files", func() {
 			err := mgr.ReplaceFiles(nil)
-			Expect(err).ShouldNot(HaveOccurred())
+			Expect(err).ToNot(HaveOccurred())
 
 			ensureNotExist(regular2, regular3, secret)
+		})
+	})
+
+	When("file does not exist", func() {
+		It("should not error", func() {
+			fakeOSMgr := &filefakes.FakeOSFileManager{}
+			mgr := file.NewManagerImpl(zap.New(), fakeOSMgr)
+
+			files := []file.File{
+				{
+					Type:    file.TypeRegular,
+					Path:    "regular-1.conf",
+					Content: []byte("regular-1"),
+				},
+			}
+
+			Expect(mgr.ReplaceFiles(files)).ToNot(HaveOccurred())
+
+			fakeOSMgr.RemoveReturns(os.ErrNotExist)
+			Expect(mgr.ReplaceFiles(files)).ToNot(HaveOccurred())
 		})
 	})
 
@@ -161,7 +181,7 @@ var _ = Describe("EventHandler", func() {
 				// to kick off removing, we need to successfully write files beforehand
 				if fakeOSMgr.RemoveStub != nil {
 					err := mgr.ReplaceFiles(files)
-					Expect(err).ShouldNot(HaveOccurred())
+					Expect(err).ToNot(HaveOccurred())
 				}
 
 				err := mgr.ReplaceFiles(files)
@@ -171,7 +191,7 @@ var _ = Describe("EventHandler", func() {
 			Entry(
 				"Remove",
 				&filefakes.FakeOSFileManager{
-					RemoveStub: func(s string) error {
+					RemoveStub: func(_ string) error {
 						return testErr
 					},
 				},
@@ -179,7 +199,7 @@ var _ = Describe("EventHandler", func() {
 			Entry(
 				"Create",
 				&filefakes.FakeOSFileManager{
-					CreateStub: func(s string) (*os.File, error) {
+					CreateStub: func(_ string) (*os.File, error) {
 						return nil, testErr
 					},
 				},
@@ -187,7 +207,7 @@ var _ = Describe("EventHandler", func() {
 			Entry(
 				"Chmod",
 				&filefakes.FakeOSFileManager{
-					ChmodStub: func(os *os.File, mode os.FileMode) error {
+					ChmodStub: func(_ *os.File, _ os.FileMode) error {
 						return testErr
 					},
 				},
@@ -195,7 +215,7 @@ var _ = Describe("EventHandler", func() {
 			Entry(
 				"Write",
 				&filefakes.FakeOSFileManager{
-					WriteStub: func(os *os.File, bytes []byte) error {
+					WriteStub: func(_ *os.File, _ []byte) error {
 						return testErr
 					},
 				},

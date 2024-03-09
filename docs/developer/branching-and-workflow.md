@@ -1,19 +1,19 @@
 # Branching and Workflow
 
-NKG is an open source and public repository; our goal is to keep the number of branches in the repository to a minimum:
+NGF is an open source and public repository; our goal is to keep the number of branches in the repository to a minimum:
 the main branch, release branches and long-term feature branches.
 
 Internal developers and external contributors will follow a fork and merge process. Each contributor should fork the
-repo to their own space; branch, experiment, develop and prepare a pull request (PR) to merge their work into NKG’s main
+repo to their own space; branch, experiment, develop and prepare a pull request (PR) to merge their work into NGF’s main
 branch. This way ephemeral developer branches will remain outside the main repository.
 
 Below is an example of following the merge and fork process. Developer Alice:
 
-- Forks `github.com/nginxinc/nginx-kubernetes-gateway` → `github.com/<alice-user-id>/nginx-kubernetes-gateway`
+- Forks `github.com/nginxinc/nginx-gateway-fabric` → `github.com/<alice-user-id>/nginx-gateway-fabric`
 - Adds upstream:
 
   ```shell
-  git remote add upstream git@github.com:nginxinc/nginx-kubernetes-gateway.git
+  git remote add upstream git@github.com:nginxinc/nginx-gateway-fabric.git
   ```
 
 - Alice lists all of her configured remotes:
@@ -25,15 +25,15 @@ Below is an example of following the merge and fork process. Developer Alice:
   Which shows the following:
 
   ```text
-  origin	git@github.com:<alice-user-id>/nginx-kubernetes-gateway.git (fetch)
-  origin	git@github.com:<alice-user-id>/nginx-kubernetes-gateway.git (push)
-  upstream	git@github.com:nginxinc/nginx-kubernetes-gateway.git (fetch)
-  upstream	git@github.com:nginxinc/nginx-kubernetes-gateway.git (push)
+  origin	git@github.com:<alice-user-id>/nginx-gateway-fabric.git (fetch)
+  origin	git@github.com:<alice-user-id>/nginx-gateway-fabric.git (push)
+  upstream	git@github.com:nginxinc/nginx-gateway-fabric.git (fetch)
+  upstream	git@github.com:nginxinc/nginx-gateway-fabric.git (push)
   ```
 
 - Alice develops a feature or bugfix - using as many ephemeral branches as she needs.
 - Alice creates a
-  PR `github.com/<alice-user-id>/nginx-kubernetes-gateway:feature/some-feature` → `github.com/nginxinc/nginx-kubernetes-gateway:main`
+  PR `github.com/<alice-user-id>/nginx-gateway-fabric:feature/some-feature` → `github.com/nginxinc/nginx-gateway-fabric:main`
 - Alice keeps her fork up to date by running:
 
   ```shell
@@ -56,3 +56,10 @@ branches. This practice helps maintain consistent labeling and allows for the au
 notes.
 
 For a comprehensive list of labels and prefixes, please refer to the [labeler](/.github/labeler.yml) file.
+
+## NGINX Plus Builds
+
+The CI/CD pipeline builds a Docker image for NGINX Plus from the NGINX Plus [Dockerfile](build/Dockerfile.nginxplus) for every commit to the `main` branch, the release branches and for every PR.
+When a PR is opened, the CI/CD will use the cached image from the last build if there aren't any changes to the Dockerfile. If you're planning to make changes to the Dockerfile,
+you would need to create a branch in the upstream repository. If you don't have write access to the upstream repository, you would need to contact the maintainers
+and ask them to create a branch for you so that the changes to the Dockerfile can be cached. After that your PR from a forked repository will be able to use the cached image.

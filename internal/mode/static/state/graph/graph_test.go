@@ -6,14 +6,21 @@ import (
 
 	. "github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
+	discoveryV1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	"sigs.k8s.io/gateway-api/apis/v1alpha2"
 	"sigs.k8s.io/gateway-api/apis/v1beta1"
 
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/framework/helpers"
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/state/validation"
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/state/validation/validationfakes"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/framework/conditions"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/framework/controller/index"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/framework/helpers"
+	staticConds "github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/state/conditions"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/state/validation"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/state/validation/validationfakes"
 )
 
 func TestBuildGraph(t *testing.T) {
@@ -21,6 +28,11 @@ func TestBuildGraph(t *testing.T) {
 		gcName         = "my-class"
 		controllerName = "my.controller"
 	)
+
+	protectedPorts := ProtectedPorts{
+		9113: "MetricsPort",
+		8081: "HealthPort",
+	}
 
 	createValidRuleWithBackendRefs := func(refs []BackendRef) Rule {
 		return Rule{
@@ -30,43 +42,43 @@ func TestBuildGraph(t *testing.T) {
 		}
 	}
 
-	createRoute := func(name string, gatewayName string, listenerName string) *v1beta1.HTTPRoute {
-		return &v1beta1.HTTPRoute{
+	createRoute := func(name string, gatewayName string, listenerName string) *gatewayv1.HTTPRoute {
+		return &gatewayv1.HTTPRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: "test",
 				Name:      name,
 			},
-			Spec: v1beta1.HTTPRouteSpec{
-				CommonRouteSpec: v1beta1.CommonRouteSpec{
-					ParentRefs: []v1beta1.ParentReference{
+			Spec: gatewayv1.HTTPRouteSpec{
+				CommonRouteSpec: gatewayv1.CommonRouteSpec{
+					ParentRefs: []gatewayv1.ParentReference{
 						{
-							Namespace:   (*v1beta1.Namespace)(helpers.GetStringPointer("test")),
-							Name:        v1beta1.ObjectName(gatewayName),
-							SectionName: (*v1beta1.SectionName)(helpers.GetStringPointer(listenerName)),
+							Namespace:   (*gatewayv1.Namespace)(helpers.GetPointer("test")),
+							Name:        gatewayv1.ObjectName(gatewayName),
+							SectionName: (*gatewayv1.SectionName)(helpers.GetPointer(listenerName)),
 						},
 					},
 				},
-				Hostnames: []v1beta1.Hostname{
+				Hostnames: []gatewayv1.Hostname{
 					"foo.example.com",
 				},
-				Rules: []v1beta1.HTTPRouteRule{
+				Rules: []gatewayv1.HTTPRouteRule{
 					{
-						Matches: []v1beta1.HTTPRouteMatch{
+						Matches: []gatewayv1.HTTPRouteMatch{
 							{
-								Path: &v1beta1.HTTPPathMatch{
-									Type:  helpers.GetPointer(v1beta1.PathMatchPathPrefix),
-									Value: helpers.GetStringPointer("/"),
+								Path: &gatewayv1.HTTPPathMatch{
+									Type:  helpers.GetPointer(gatewayv1.PathMatchPathPrefix),
+									Value: helpers.GetPointer("/"),
 								},
 							},
 						},
-						BackendRefs: []v1beta1.HTTPBackendRef{
+						BackendRefs: []gatewayv1.HTTPBackendRef{
 							{
-								BackendRef: v1beta1.BackendRef{
-									BackendObjectReference: v1beta1.BackendObjectReference{
-										Kind:      (*v1beta1.Kind)(helpers.GetStringPointer("Service")),
+								BackendRef: gatewayv1.BackendRef{
+									BackendObjectReference: gatewayv1.BackendObjectReference{
+										Kind:      (*gatewayv1.Kind)(helpers.GetPointer("Service")),
 										Name:      "foo",
-										Namespace: (*v1beta1.Namespace)(helpers.GetStringPointer("service")),
-										Port:      (*v1beta1.PortNumber)(helpers.GetInt32Pointer(80)),
+										Namespace: (*gatewayv1.Namespace)(helpers.GetPointer("service")),
+										Port:      (*gatewayv1.PortNumber)(helpers.GetPointer[int32](80)),
 									},
 								},
 							},
@@ -81,23 +93,72 @@ func TestBuildGraph(t *testing.T) {
 	hr2 := createRoute("hr-2", "wrong-gateway", "listener-80-1")
 	hr3 := createRoute("hr-3", "gateway-1", "listener-443-1") // https listener; should not conflict with hr1
 
-	fooSvc := &v1.Service{ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "service"}}
+	cm := &v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "configmap",
+			Namespace: "service",
+		},
+		Data: map[string]string{
+			"ca.crt": caBlock,
+		},
+	}
+
+	btpAcceptedConds := []conditions.Condition{
+		staticConds.NewBackendTLSPolicyAccepted(),
+		staticConds.NewBackendTLSPolicyAccepted(),
+	}
+
+	btp := BackendTLSPolicy{
+		Source: &v1alpha2.BackendTLSPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "btp",
+				Namespace: "service",
+			},
+			Spec: v1alpha2.BackendTLSPolicySpec{
+				TargetRef: v1alpha2.PolicyTargetReferenceWithSectionName{
+					PolicyTargetReference: v1alpha2.PolicyTargetReference{
+						Group:     "",
+						Kind:      "Service",
+						Name:      "foo",
+						Namespace: (*gatewayv1.Namespace)(helpers.GetPointer("service")),
+					},
+				},
+				TLS: v1alpha2.BackendTLSPolicyConfig{
+					Hostname: "foo.example.com",
+					CACertRefs: []v1alpha2.LocalObjectReference{
+						{
+							Kind:  "ConfigMap",
+							Name:  "configmap",
+							Group: "",
+						},
+					},
+				},
+			},
+		},
+		Valid:        true,
+		IsReferenced: true,
+		Gateway:      types.NamespacedName{Namespace: "test", Name: "gateway-1"},
+		Conditions:   btpAcceptedConds,
+		CaCertRef:    types.NamespacedName{Namespace: "service", Name: "configmap"},
+	}
 
 	hr1Refs := []BackendRef{
 		{
-			Svc:    fooSvc,
-			Port:   80,
-			Valid:  true,
-			Weight: 1,
+			SvcNsName:        types.NamespacedName{Namespace: "service", Name: "foo"},
+			ServicePort:      v1.ServicePort{Port: 80},
+			Valid:            true,
+			Weight:           1,
+			BackendTLSPolicy: &btp,
 		},
 	}
 
 	hr3Refs := []BackendRef{
 		{
-			Svc:    fooSvc,
-			Port:   80,
-			Valid:  true,
-			Weight: 1,
+			SvcNsName:        types.NamespacedName{Namespace: "service", Name: "foo"},
+			ServicePort:      v1.ServicePort{Port: 80},
+			Valid:            true,
+			Weight:           1,
+			BackendTLSPolicy: &btp,
 		},
 	}
 
@@ -113,37 +174,56 @@ func TestBuildGraph(t *testing.T) {
 		Type: v1.SecretTypeTLS,
 	}
 
-	createGateway := func(name string) *v1beta1.Gateway {
-		return &v1beta1.Gateway{
+	ns := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test",
+			Labels: map[string]string{
+				"app": "allowed",
+			},
+		},
+	}
+
+	createGateway := func(name string) *gatewayv1.Gateway {
+		return &gatewayv1.Gateway{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: "test",
 				Name:      name,
 			},
-			Spec: v1beta1.GatewaySpec{
+			Spec: gatewayv1.GatewaySpec{
 				GatewayClassName: gcName,
-				Listeners: []v1beta1.Listener{
+				Listeners: []gatewayv1.Listener{
 					{
 						Name:     "listener-80-1",
 						Hostname: nil,
 						Port:     80,
-						Protocol: v1beta1.HTTPProtocolType,
+						Protocol: gatewayv1.HTTPProtocolType,
+						AllowedRoutes: &gatewayv1.AllowedRoutes{
+							Namespaces: &gatewayv1.RouteNamespaces{
+								From: helpers.GetPointer(gatewayv1.NamespacesFromSelector),
+								Selector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{
+										"app": "allowed",
+									},
+								},
+							},
+						},
 					},
 
 					{
 						Name:     "listener-443-1",
 						Hostname: nil,
 						Port:     443,
-						TLS: &v1beta1.GatewayTLSConfig{
-							Mode: helpers.GetTLSModePointer(v1beta1.TLSModeTerminate),
-							CertificateRefs: []v1beta1.SecretObjectReference{
+						TLS: &gatewayv1.GatewayTLSConfig{
+							Mode: helpers.GetPointer(gatewayv1.TLSModeTerminate),
+							CertificateRefs: []gatewayv1.SecretObjectReference{
 								{
-									Kind:      helpers.GetPointer[v1beta1.Kind]("Secret"),
-									Name:      v1beta1.ObjectName(secret.Name),
-									Namespace: helpers.GetPointer(v1beta1.Namespace(secret.Namespace)),
+									Kind:      helpers.GetPointer[gatewayv1.Kind]("Secret"),
+									Name:      gatewayv1.ObjectName(secret.Name),
+									Namespace: helpers.GetPointer(gatewayv1.Namespace(secret.Namespace)),
 								},
 							},
 						},
-						Protocol: v1beta1.HTTPSProtocolType,
+						Protocol: gatewayv1.HTTPSProtocolType,
 					},
 				},
 			},
@@ -153,7 +233,18 @@ func TestBuildGraph(t *testing.T) {
 	gw1 := createGateway("gateway-1")
 	gw2 := createGateway("gateway-2")
 
-	svc := &v1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "service", Name: "foo"}}
+	svc := &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "service", Name: "foo",
+		},
+		Spec: v1.ServiceSpec{
+			Ports: []v1.ServicePort{
+				{
+					Port: 80,
+				},
+			},
+		},
+	}
 
 	rgSecret := &v1beta1.ReferenceGrant{
 		ObjectMeta: metav1.ObjectMeta{
@@ -163,7 +254,7 @@ func TestBuildGraph(t *testing.T) {
 		Spec: v1beta1.ReferenceGrantSpec{
 			From: []v1beta1.ReferenceGrantFrom{
 				{
-					Group:     v1beta1.GroupName,
+					Group:     gatewayv1.GroupName,
 					Kind:      "Gateway",
 					Namespace: "test",
 				},
@@ -184,7 +275,7 @@ func TestBuildGraph(t *testing.T) {
 		Spec: v1beta1.ReferenceGrantSpec{
 			From: []v1beta1.ReferenceGrantFrom{
 				{
-					Group:     v1beta1.GroupName,
+					Group:     gatewayv1.GroupName,
 					Kind:      "HTTPRoute",
 					Namespace: "test",
 				},
@@ -197,22 +288,25 @@ func TestBuildGraph(t *testing.T) {
 		},
 	}
 
-	createStateWithGatewayClass := func(gc *v1beta1.GatewayClass) ClusterState {
+	createStateWithGatewayClass := func(gc *gatewayv1.GatewayClass) ClusterState {
 		return ClusterState{
-			GatewayClasses: map[types.NamespacedName]*v1beta1.GatewayClass{
+			GatewayClasses: map[types.NamespacedName]*gatewayv1.GatewayClass{
 				client.ObjectKeyFromObject(gc): gc,
 			},
-			Gateways: map[types.NamespacedName]*v1beta1.Gateway{
+			Gateways: map[types.NamespacedName]*gatewayv1.Gateway{
 				client.ObjectKeyFromObject(gw1): gw1,
 				client.ObjectKeyFromObject(gw2): gw2,
 			},
-			HTTPRoutes: map[types.NamespacedName]*v1beta1.HTTPRoute{
+			HTTPRoutes: map[types.NamespacedName]*gatewayv1.HTTPRoute{
 				client.ObjectKeyFromObject(hr1): hr1,
 				client.ObjectKeyFromObject(hr2): hr2,
 				client.ObjectKeyFromObject(hr3): hr3,
 			},
 			Services: map[types.NamespacedName]*v1.Service{
 				client.ObjectKeyFromObject(svc): svc,
+			},
+			Namespaces: map[types.NamespacedName]*v1.Namespace{
+				client.ObjectKeyFromObject(ns): ns,
 			},
 			ReferenceGrants: map[types.NamespacedName]*v1beta1.ReferenceGrant{
 				client.ObjectKeyFromObject(rgSecret):  rgSecret,
@@ -221,12 +315,19 @@ func TestBuildGraph(t *testing.T) {
 			Secrets: map[types.NamespacedName]*v1.Secret{
 				client.ObjectKeyFromObject(secret): secret,
 			},
+			BackendTLSPolicies: map[types.NamespacedName]*v1alpha2.BackendTLSPolicy{
+				client.ObjectKeyFromObject(btp.Source): btp.Source,
+			},
+			ConfigMaps: map[types.NamespacedName]*v1.ConfigMap{
+				client.ObjectKeyFromObject(cm): cm,
+			},
 		}
 	}
 
 	routeHR1 := &Route{
-		Valid:  true,
-		Source: hr1,
+		Valid:      true,
+		Attachable: true,
+		Source:     hr1,
 		ParentRefs: []ParentRef{
 			{
 				Idx:     0,
@@ -241,8 +342,9 @@ func TestBuildGraph(t *testing.T) {
 	}
 
 	routeHR3 := &Route{
-		Valid:  true,
-		Source: hr3,
+		Valid:      true,
+		Attachable: true,
+		Source:     hr3,
 		ParentRefs: []ParentRef{
 			{
 				Idx:     0,
@@ -256,7 +358,7 @@ func TestBuildGraph(t *testing.T) {
 		Rules: []Rule{createValidRuleWithBackendRefs(hr3Refs)},
 	}
 
-	createExpectedGraphWithGatewayClass := func(gc *v1beta1.GatewayClass) *Graph {
+	createExpectedGraphWithGatewayClass := func(gc *gatewayv1.GatewayClass) *Graph {
 		return &Graph{
 			GatewayClass: &GatewayClass{
 				Source: gc,
@@ -264,28 +366,33 @@ func TestBuildGraph(t *testing.T) {
 			},
 			Gateway: &Gateway{
 				Source: gw1,
-				Listeners: map[string]*Listener{
-					"listener-80-1": {
-						Source: gw1.Spec.Listeners[0],
-						Valid:  true,
+				Listeners: []*Listener{
+					{
+						Name:       "listener-80-1",
+						Source:     gw1.Spec.Listeners[0],
+						Valid:      true,
+						Attachable: true,
 						Routes: map[types.NamespacedName]*Route{
 							{Namespace: "test", Name: "hr-1"}: routeHR1,
 						},
-						SupportedKinds: []v1beta1.RouteGroupKind{{Kind: "HTTPRoute"}},
+						SupportedKinds:            []gatewayv1.RouteGroupKind{{Kind: "HTTPRoute"}},
+						AllowedRouteLabelSelector: labels.SelectorFromSet(map[string]string{"app": "allowed"}),
 					},
-					"listener-443-1": {
-						Source: gw1.Spec.Listeners[1],
-						Valid:  true,
+					{
+						Name:       "listener-443-1",
+						Source:     gw1.Spec.Listeners[1],
+						Valid:      true,
+						Attachable: true,
 						Routes: map[types.NamespacedName]*Route{
 							{Namespace: "test", Name: "hr-3"}: routeHR3,
 						},
 						ResolvedSecret: helpers.GetPointer(client.ObjectKeyFromObject(secret)),
-						SupportedKinds: []v1beta1.RouteGroupKind{{Kind: "HTTPRoute"}},
+						SupportedKinds: []gatewayv1.RouteGroupKind{{Kind: "HTTPRoute"}},
 					},
 				},
 				Valid: true,
 			},
-			IgnoredGateways: map[types.NamespacedName]*v1beta1.Gateway{
+			IgnoredGateways: map[types.NamespacedName]*gatewayv1.Gateway{
 				{Namespace: "test", Name: "gateway-2"}: gw2,
 			},
 			Routes: map[types.NamespacedName]*Route{
@@ -297,22 +404,37 @@ func TestBuildGraph(t *testing.T) {
 					Source: secret,
 				},
 			},
+			ReferencedNamespaces: map[types.NamespacedName]*v1.Namespace{
+				client.ObjectKeyFromObject(ns): ns,
+			},
+			ReferencedServices: map[types.NamespacedName]struct{}{
+				client.ObjectKeyFromObject(svc): {},
+			},
+			ReferencedCaCertConfigMaps: map[types.NamespacedName]*CaCertConfigMap{
+				client.ObjectKeyFromObject(cm): {
+					Source: cm,
+					CACert: []byte(caBlock),
+				},
+			},
+			BackendTLSPolicies: map[types.NamespacedName]*BackendTLSPolicy{
+				client.ObjectKeyFromObject(btp.Source): &btp,
+			},
 		}
 	}
 
-	normalGC := &v1beta1.GatewayClass{
+	normalGC := &gatewayv1.GatewayClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: gcName,
 		},
-		Spec: v1beta1.GatewayClassSpec{
+		Spec: gatewayv1.GatewayClassSpec{
 			ControllerName: controllerName,
 		},
 	}
-	differentControllerGC := &v1beta1.GatewayClass{
+	differentControllerGC := &gatewayv1.GatewayClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: gcName,
 		},
-		Spec: v1beta1.GatewayClassSpec{
+		Spec: gatewayv1.GatewayClassSpec{
 			ControllerName: "different-controller",
 		},
 	}
@@ -336,16 +458,277 @@ func TestBuildGraph(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			g := NewGomegaWithT(t)
+			g := NewWithT(t)
 
 			result := BuildGraph(
 				test.store,
 				controllerName,
 				gcName,
 				validation.Validators{HTTPFieldsValidator: &validationfakes.FakeHTTPFieldsValidator{}},
+				protectedPorts,
 			)
 
 			g.Expect(helpers.Diff(test.expected, result)).To(BeEmpty())
+		})
+	}
+}
+
+func TestIsReferenced(t *testing.T) {
+	baseSecret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "test",
+			Name:      "secret",
+		},
+	}
+	sameNamespaceDifferentNameSecret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "test",
+			Name:      "secret-different-name",
+		},
+	}
+	differentNamespaceSameNameSecret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "test-different-namespace",
+			Name:      "secret",
+		},
+	}
+
+	nsInGraph := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test",
+			Labels: map[string]string{
+				"app": "allowed",
+			},
+		},
+	}
+	nsNotInGraph := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "different-name",
+			Labels: map[string]string{
+				"app": "allowed",
+			},
+		},
+	}
+
+	serviceInGraph := &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "serviceInGraph",
+		},
+	}
+	serviceNotInGraph := &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "serviceNotInGraph",
+		},
+	}
+	serviceNotInGraphSameNameDifferentNS := &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "not-default",
+			Name:      "serviceInGraph",
+		},
+	}
+	emptyService := &v1.Service{}
+
+	createEndpointSlice := func(name string, svcName string) *discoveryV1.EndpointSlice {
+		return &discoveryV1.EndpointSlice{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      name,
+				Labels:    map[string]string{index.KubernetesServiceNameLabel: svcName},
+			},
+		}
+	}
+	endpointSliceInGraph := createEndpointSlice("endpointSliceInGraph", "serviceInGraph")
+	endpointSliceNotInGraph := createEndpointSlice("endpointSliceNotInGraph", "serviceNotInGraph")
+	emptyEndpointSlice := &discoveryV1.EndpointSlice{}
+
+	gw := &Gateway{
+		Listeners: []*Listener{
+			{
+				Name:                      "listener-1",
+				Valid:                     true,
+				AllowedRouteLabelSelector: labels.SelectorFromSet(map[string]string{"apples": "oranges"}),
+			},
+		},
+		Valid: true,
+	}
+
+	nsNotInGraphButInGateway := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "notInGraphButInGateway",
+			Labels: map[string]string{
+				"apples": "oranges",
+			},
+		},
+	}
+
+	baseConfigMap := &v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "test",
+			Name:      "configmap",
+		},
+	}
+	sameNamespaceDifferentNameConfigMap := &v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "test",
+			Name:      "configmap-different-name",
+		},
+	}
+	differentNamespaceSameNameConfigMap := &v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "test-different-namespace",
+			Name:      "configmap",
+		},
+	}
+
+	graph := &Graph{
+		Gateway: gw,
+		ReferencedSecrets: map[types.NamespacedName]*Secret{
+			client.ObjectKeyFromObject(baseSecret): {
+				Source: baseSecret,
+			},
+		},
+		ReferencedNamespaces: map[types.NamespacedName]*v1.Namespace{
+			client.ObjectKeyFromObject(nsInGraph): nsInGraph,
+		},
+		ReferencedServices: map[types.NamespacedName]struct{}{
+			client.ObjectKeyFromObject(serviceInGraph): {},
+		},
+		ReferencedCaCertConfigMaps: map[types.NamespacedName]*CaCertConfigMap{
+			client.ObjectKeyFromObject(baseConfigMap): {
+				Source: baseConfigMap,
+				CACert: []byte(caBlock),
+			},
+		},
+	}
+
+	tests := []struct {
+		graph    *Graph
+		resource client.Object
+		name     string
+		expected bool
+	}{
+		// Namespace tests
+		{
+			name:     "Namespace in graph's ReferencedNamespaces is referenced",
+			resource: nsInGraph,
+			graph:    graph,
+			expected: true,
+		},
+		{
+			name:     "Namespace with a different name but same labels is not referenced",
+			resource: nsNotInGraph,
+			graph:    graph,
+			expected: false,
+		},
+		{
+			name: "Namespace not in ReferencedNamespaces but in Gateway Listener's AllowedRouteLabelSelector" +
+				" is referenced",
+			resource: nsNotInGraphButInGateway,
+			graph:    graph,
+			expected: true,
+		},
+
+		// Secret tests
+		{
+			name:     "Secret in graph's ReferencedSecrets is referenced",
+			resource: baseSecret,
+			graph:    graph,
+			expected: true,
+		},
+		{
+			name:     "Secret not in ReferencedSecrets with same Namespace and different Name is not referenced",
+			resource: sameNamespaceDifferentNameSecret,
+			graph:    graph,
+			expected: false,
+		},
+		{
+			name:     "Secret not in ReferencedSecrets with different Namespace and same Name is not referenced",
+			resource: differentNamespaceSameNameSecret,
+			graph:    graph,
+			expected: false,
+		},
+
+		// Service tests
+		{
+			name:     "Service is referenced",
+			resource: serviceInGraph,
+			graph:    graph,
+			expected: true,
+		},
+		{
+			name:     "Service is not referenced",
+			resource: serviceNotInGraph,
+			graph:    graph,
+			expected: false,
+		},
+		{
+			name:     "Service with same name but different namespace is not referenced",
+			resource: serviceNotInGraphSameNameDifferentNS,
+			graph:    graph,
+			expected: false,
+		},
+		{
+			name:     "Empty Service",
+			resource: emptyService,
+			graph:    graph,
+			expected: false,
+		},
+
+		// EndpointSlice tests
+		{
+			name:     "EndpointSlice with Service owner in graph's ReferencedServices is referenced",
+			resource: endpointSliceInGraph,
+			graph:    graph,
+			expected: true,
+		},
+		{
+			name:     "EndpointSlice with Service owner not in graph's ReferencedServices is not referenced",
+			resource: endpointSliceNotInGraph,
+			graph:    graph,
+			expected: false,
+		},
+		{
+			name:     "Empty EndpointSlice",
+			resource: emptyEndpointSlice,
+			graph:    graph,
+			expected: false,
+		},
+
+		// ConfigMap cases
+		{
+			name:     "ConfigMap in graph's ReferencedConfigMaps is referenced",
+			resource: baseConfigMap,
+			graph:    graph,
+			expected: true,
+		},
+		{
+			name:     "ConfigMap not in ReferencedConfigMaps with same Namespace and different Name is not referenced",
+			resource: sameNamespaceDifferentNameConfigMap,
+			graph:    graph,
+			expected: false,
+		},
+		{
+			name:     "ConfigMap not in ReferencedConfigMaps with different Namespace and same Name is not referenced",
+			resource: differentNamespaceSameNameConfigMap,
+			graph:    graph,
+			expected: false,
+		},
+
+		// Edge cases
+		{
+			name:     "Resource is not supported by IsReferenced",
+			resource: &gatewayv1.HTTPRoute{},
+			graph:    graph,
+			expected: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			g := NewWithT(t)
+			result := test.graph.IsReferenced(test.resource, client.ObjectKeyFromObject(test.resource))
+			g.Expect(result).To(Equal(test.expected))
 		})
 	}
 }

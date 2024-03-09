@@ -3,8 +3,8 @@ package config
 import (
 	"path/filepath"
 
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/nginx/file"
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/mode/static/state/dataplane"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/nginx/file"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/mode/static/state/dataplane"
 )
 
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 . Generator
@@ -20,6 +20,9 @@ const (
 
 	// httpConfigFile is the path to the configuration file with HTTP configuration.
 	httpConfigFile = httpFolder + "/http.conf"
+
+	// configVersionFile is the path to the config version configuration file.
+	configVersionFile = httpFolder + "/config-version.conf"
 )
 
 // ConfigFolders is a list of folders where NGINX configuration files are stored.
@@ -40,11 +43,13 @@ type Generator interface {
 //
 // It also expects that the main NGINX configuration file nginx.conf is located in configFolder and nginx.conf
 // includes (https://nginx.org/en/docs/ngx_core_module.html#include) the files from httpFolder.
-type GeneratorImpl struct{}
+type GeneratorImpl struct {
+	plus bool
+}
 
 // NewGeneratorImpl creates a new GeneratorImpl.
-func NewGeneratorImpl() GeneratorImpl {
-	return GeneratorImpl{}
+func NewGeneratorImpl(plus bool) GeneratorImpl {
+	return GeneratorImpl{plus: plus}
 }
 
 // executeFunc is a function that generates NGINX configuration from internal representation.
@@ -61,7 +66,13 @@ func (g GeneratorImpl) Generate(conf dataplane.Configuration) []file.File {
 		files = append(files, generatePEM(id, pair.Cert, pair.Key))
 	}
 
-	files = append(files, generateHTTPConfig(conf))
+	files = append(files, g.generateHTTPConfig(conf))
+
+	files = append(files, generateConfigVersion(conf.Version))
+
+	for id, bundle := range conf.CertBundles {
+		files = append(files, generateCertBundle(id, bundle))
+	}
 
 	return files
 }
@@ -83,9 +94,21 @@ func generatePEMFileName(id dataplane.SSLKeyPairID) string {
 	return filepath.Join(secretsFolder, string(id)+".pem")
 }
 
-func generateHTTPConfig(conf dataplane.Configuration) file.File {
+func generateCertBundle(id dataplane.CertBundleID, cert []byte) file.File {
+	return file.File{
+		Content: cert,
+		Path:    generateCertBundleFileName(id),
+		Type:    file.TypeRegular,
+	}
+}
+
+func generateCertBundleFileName(id dataplane.CertBundleID) string {
+	return filepath.Join(secretsFolder, string(id)+".crt")
+}
+
+func (g GeneratorImpl) generateHTTPConfig(conf dataplane.Configuration) file.File {
 	var c []byte
-	for _, execute := range getExecuteFuncs() {
+	for _, execute := range g.getExecuteFuncs() {
 		c = append(c, execute(conf)...)
 	}
 
@@ -96,11 +119,22 @@ func generateHTTPConfig(conf dataplane.Configuration) file.File {
 	}
 }
 
-func getExecuteFuncs() []executeFunc {
+func (g GeneratorImpl) getExecuteFuncs() []executeFunc {
 	return []executeFunc{
-		executeUpstreams,
+		g.executeUpstreams,
 		executeSplitClients,
 		executeServers,
 		executeMaps,
+	}
+}
+
+// generateConfigVersion writes the config version file.
+func generateConfigVersion(configVersion int) file.File {
+	c := executeVersion(configVersion)
+
+	return file.File{
+		Content: c,
+		Path:    configVersionFile,
+		Type:    file.TypeRegular,
 	}
 }

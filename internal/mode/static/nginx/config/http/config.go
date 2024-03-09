@@ -13,11 +13,12 @@ type Server struct {
 // Location holds all configuration for an HTTP location.
 type Location struct {
 	Return          *Return
+	ProxySSLVerify  *ProxySSLVerify
 	Path            string
 	ProxyPass       string
 	HTTPMatchVar    string
+	Rewrites        []string
 	ProxySetHeaders []Header
-	Internal        bool
 }
 
 // Header defines a HTTP header to be passed to the proxied server.
@@ -52,8 +53,9 @@ const (
 
 // Upstream holds all configuration for an HTTP upstream.
 type Upstream struct {
-	Name    string
-	Servers []UpstreamServer
+	Name     string
+	ZoneSize string // format: 512k, 1m
+	Servers  []UpstreamServer
 }
 
 // UpstreamServer holds all configuration for an HTTP upstream server.
@@ -84,4 +86,10 @@ type Map struct {
 type MapParameter struct {
 	Value  string
 	Result string
+}
+
+// ProxySSLVerify holds the proxied HTTPS server verification configuration.
+type ProxySSLVerify struct {
+	TrustedCertificate string
+	Name               string
 }

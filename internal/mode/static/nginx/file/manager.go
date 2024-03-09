@@ -10,8 +10,10 @@ import (
 )
 
 const (
+	// regularFileMode defines the default file mode for regular files.
+	regularFileMode = 0o644
 	// secretFileMode defines the default file mode for files with secrets.
-	secretFileMode = 0o600
+	secretFileMode = 0o640
 )
 
 // Type is the type of File.
@@ -88,10 +90,18 @@ func NewManagerImpl(logger logr.Logger, osFileManager OSFileManager) *ManagerImp
 func (m *ManagerImpl) ReplaceFiles(files []File) error {
 	for _, path := range m.lastWrittenPaths {
 		if err := m.osFileManager.Remove(path); err != nil {
+			if os.IsNotExist(err) {
+				m.logger.Info(
+					"File not found when attempting to delete",
+					"path", path,
+					"error", err,
+				)
+				continue
+			}
 			return fmt.Errorf("failed to delete file %q: %w", path, err)
 		}
 
-		m.logger.Info("deleted file", "path", path)
+		m.logger.Info("Deleted file", "path", path)
 	}
 
 	// In some cases, NGINX reads files in runtime, like a JWK. If you remove such file, NGINX will fail
@@ -106,7 +116,7 @@ func (m *ManagerImpl) ReplaceFiles(files []File) error {
 		}
 
 		m.lastWrittenPaths = append(m.lastWrittenPaths, file.Path)
-		m.logger.Info("wrote file", "path", file.Path)
+		m.logger.Info("Wrote file", "path", file.Path)
 	}
 
 	return nil
@@ -128,11 +138,20 @@ func writeFile(fileMgr OSFileManager, file File) error {
 		}
 	}()
 
-	if file.Type == TypeSecret {
-		if err := fileMgr.Chmod(f, secretFileMode); err != nil {
-			resultErr = fmt.Errorf("failed to set file mode for %q: %w", file.Path, err)
+	switch file.Type {
+	case TypeRegular:
+		if err := fileMgr.Chmod(f, regularFileMode); err != nil {
+			resultErr = fmt.Errorf(
+				"failed to set file mode to %#o for %q: %w", regularFileMode, file.Path, err)
 			return resultErr
 		}
+	case TypeSecret:
+		if err := fileMgr.Chmod(f, secretFileMode); err != nil {
+			resultErr = fmt.Errorf("failed to set file mode to %#o for %q: %w", secretFileMode, file.Path, err)
+			return resultErr
+		}
+	default:
+		panic(fmt.Sprintf("unknown file type %d", file.Type))
 	}
 
 	if err := fileMgr.Write(f, file.Content); err != nil {

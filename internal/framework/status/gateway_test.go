@@ -6,41 +6,42 @@ import (
 
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/gateway-api/apis/v1beta1"
+	v1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/nginxinc/nginx-kubernetes-gateway/internal/framework/helpers"
+	"github.com/nginxinc/nginx-gateway-fabric/internal/framework/helpers"
 )
 
 func TestPrepareGatewayStatus(t *testing.T) {
-	ipAddrType := v1beta1.IPAddressType
-	podIP := v1beta1.GatewayAddress{
-		Type:  &ipAddrType,
+	podIP := v1.GatewayStatusAddress{
+		Type:  helpers.GetPointer(v1.IPAddressType),
 		Value: "1.2.3.4",
 	}
 	status := GatewayStatus{
 		Conditions: CreateTestConditions("GatewayTest"),
 		ListenerStatuses: ListenerStatuses{
-			"listener": {
+			{
+				Name:           "listener",
 				AttachedRoutes: 3,
 				Conditions:     CreateTestConditions("ListenerTest"),
-				SupportedKinds: []v1beta1.RouteGroupKind{
+				SupportedKinds: []v1.RouteGroupKind{
 					{
-						Kind: v1beta1.Kind("HTTPRoute"),
+						Kind: v1.Kind("HTTPRoute"),
 					},
 				},
 			},
 		},
+		Addresses:          []v1.GatewayStatusAddress{podIP},
 		ObservedGeneration: 1,
 	}
 
 	transitionTime := metav1.NewTime(time.Now())
 
-	expected := v1beta1.GatewayStatus{
+	expected := v1.GatewayStatus{
 		Conditions: CreateExpectedAPIConditions("GatewayTest", 1, transitionTime),
-		Listeners: []v1beta1.ListenerStatus{
+		Listeners: []v1.ListenerStatus{
 			{
 				Name: "listener",
-				SupportedKinds: []v1beta1.RouteGroupKind{
+				SupportedKinds: []v1.RouteGroupKind{
 					{
 						Kind: "HTTPRoute",
 					},
@@ -49,11 +50,11 @@ func TestPrepareGatewayStatus(t *testing.T) {
 				Conditions:     CreateExpectedAPIConditions("ListenerTest", 1, transitionTime),
 			},
 		},
-		Addresses: []v1beta1.GatewayAddress{podIP},
+		Addresses: []v1.GatewayStatusAddress{podIP},
 	}
 
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
-	result := prepareGatewayStatus(status, "1.2.3.4", transitionTime)
+	result := prepareGatewayStatus(status, transitionTime)
 	g.Expect(helpers.Diff(expected, result)).To(BeEmpty())
 }
